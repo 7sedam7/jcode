@@ -18,6 +18,7 @@ pub enum RuntimeProviderId {
     AzureOpenAi,
     Bedrock,
     Cursor,
+    GrokBuild,
     Copilot,
     Gemini,
     Antigravity,
@@ -37,6 +38,7 @@ impl RuntimeProviderId {
             Self::AzureOpenAi => "azure-openai",
             Self::Bedrock => "bedrock",
             Self::Cursor => "cursor",
+            Self::GrokBuild => "grok-build",
             Self::Copilot => "copilot",
             Self::Gemini => "gemini",
             Self::Antigravity => "antigravity",
@@ -46,7 +48,7 @@ impl RuntimeProviderId {
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Jcode => "Jcode Hosted Models",
+            Self::Jcode => "Jcode Subscription",
             Self::Claude => "Anthropic/Claude",
             Self::ClaudeApiKey => "Anthropic API",
             Self::OpenAi => "OpenAI",
@@ -56,6 +58,7 @@ impl RuntimeProviderId {
             Self::AzureOpenAi => "Azure OpenAI",
             Self::Bedrock => "AWS Bedrock",
             Self::Cursor => "Cursor",
+            Self::GrokBuild => "Grok Build",
             Self::Copilot => "GitHub Copilot",
             Self::Gemini => "Gemini",
             Self::Antigravity => "Antigravity",

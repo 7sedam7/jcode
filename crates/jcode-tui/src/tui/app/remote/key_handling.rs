@@ -390,6 +390,42 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.toggle_keys.auto_poke.matches(code, modifiers) {
+        if app.auto_poke_incomplete_todos {
+            let cleared = app_mod::commands::disable_auto_poke(app);
+            app.set_status_notice("Poke: OFF");
+            app.push_display_message(DisplayMessage::system(
+                app_mod::commands::poke_disabled_message(cleared),
+            ));
+        } else {
+            match app_mod::commands::activate_auto_poke(app) {
+                app_mod::commands::PokeActivation::EnabledNoIncomplete => {
+                    app.push_display_message(DisplayMessage::system(
+                        app_mod::commands::poke_enabled_without_incomplete_message(),
+                    ));
+                }
+                app_mod::commands::PokeActivation::Queued => {
+                    app.push_display_message(DisplayMessage::system(
+                        app_mod::commands::poke_queued_display_message(),
+                    ));
+                }
+                app_mod::commands::PokeActivation::SendNow {
+                    incomplete_count,
+                    poke_msg,
+                } => {
+                    app.push_display_message(DisplayMessage::system(
+                        app_mod::commands::poke_triggered_display_message(incomplete_count),
+                    ));
+
+                    let _ =
+                        begin_remote_send(app, remote, poke_msg, vec![], true, None, true, 0).await;
+                    app.visible_turn_started = Some(Instant::now());
+                }
+            }
+        }
+        return Ok(());
+    }
+
     if app.toggle_keys.side_panel.matches(code, modifiers) {
         app.toggle_side_panel();
         return Ok(());
@@ -546,6 +582,10 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if handle_ctrl_kill_to_end(app, code, modifiers) {
+        return Ok(());
+    }
+
     if let Some(amount) = app.scroll_keys.scroll_amount(code, modifiers) {
         if amount < 0 {
             app.scroll_up((-amount) as usize);
@@ -696,50 +736,6 @@ async fn handle_remote_key_internal(
                 app.toggle_input_stash();
                 return Ok(());
             }
-            KeyCode::Char('p') => {
-                if app.auto_poke_incomplete_todos {
-                    let cleared = app_mod::commands::disable_auto_poke(app);
-                    app.set_status_notice("Poke: OFF");
-                    app.push_display_message(DisplayMessage::system(
-                        app_mod::commands::poke_disabled_message(cleared),
-                    ));
-                } else {
-                    match app_mod::commands::activate_auto_poke(app) {
-                        app_mod::commands::PokeActivation::EnabledNoIncomplete => {
-                            app.push_display_message(DisplayMessage::system(
-                                app_mod::commands::poke_enabled_without_incomplete_message(),
-                            ));
-                        }
-                        app_mod::commands::PokeActivation::Queued => {
-                            app.push_display_message(DisplayMessage::system(
-                                app_mod::commands::poke_queued_display_message(),
-                            ));
-                        }
-                        app_mod::commands::PokeActivation::SendNow {
-                            incomplete_count,
-                            poke_msg,
-                        } => {
-                            app.push_display_message(DisplayMessage::system(
-                                app_mod::commands::poke_triggered_display_message(incomplete_count),
-                            ));
-
-                            let _ = begin_remote_send(
-                                app,
-                                remote,
-                                poke_msg,
-                                vec![],
-                                true,
-                                None,
-                                true,
-                                0,
-                            )
-                            .await;
-                            app.visible_turn_started = Some(Instant::now());
-                        }
-                    }
-                }
-                return Ok(());
-            }
             KeyCode::Char('v') => {
                 app.paste_from_clipboard();
                 return Ok(());
@@ -771,10 +767,7 @@ async fn handle_remote_key_internal(
         }
     }
 
-    if code == KeyCode::Enter
-        && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
-        && !app.input.trim().starts_with('/')
-    {
+    if input::is_alternate_enter(code, modifiers) && !app.input.trim().starts_with('/') {
         if app.activate_picker_from_preview() {
             return Ok(());
         }
@@ -1665,6 +1658,9 @@ async fn handle_remote_key_internal(
                     // are both orphaned (same rationale as
                     // reset_current_session; side panel is #605).
                     crate::tui::mermaid::clear_active_diagrams();
+                    app.swarm_plan_items.clear();
+                    app.swarm_plan_version = None;
+                    app.swarm_plan_swarm_id = None;
                     super::super::commands_review::clear_side_panel_for_new_session(app);
                     app.is_processing = false;
                     app.status = ProcessingStatus::Idle;

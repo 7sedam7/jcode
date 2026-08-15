@@ -14,6 +14,7 @@ pub mod external;
 pub mod gemini;
 pub mod google;
 pub(crate) mod google_oauth;
+pub mod grok_build;
 pub mod integration;
 pub mod lifecycle;
 pub mod login_diagnostics;
@@ -400,6 +401,7 @@ impl AuthStatus {
             || self.antigravity == AuthState::Available
             || self.gemini == AuthState::Available
             || self.cursor == AuthState::Available
+            || self.grok_build == AuthState::Available
     }
 
     /// Emit a structured, non-secret snapshot of which providers currently have
@@ -435,6 +437,7 @@ impl AuthStatus {
                 ("antigravity", self.antigravity.label().to_string()),
                 ("gemini", self.gemini.label().to_string()),
                 ("cursor", self.cursor.label().to_string()),
+                ("grok_build", self.grok_build.label().to_string()),
             ],
         );
     }
@@ -467,6 +470,7 @@ impl AuthStatus {
             LoginProviderAuthStateKey::Antigravity => self.antigravity,
             LoginProviderAuthStateKey::Gemini => self.gemini,
             LoginProviderAuthStateKey::Cursor => self.cursor,
+            LoginProviderAuthStateKey::GrokBuild => self.grok_build,
             LoginProviderAuthStateKey::Google => self.google,
         }
     }
@@ -531,6 +535,7 @@ impl AuthStatus {
                     AuthState::NotConfigured
                 }
             }
+            crate::provider_catalog::LoginProviderTarget::GrokBuild => self.grok_build,
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
                 if crate::provider_catalog::openai_compatible_profile_is_configured(profile) {
                     AuthState::Available
@@ -600,6 +605,15 @@ impl AuthStatus {
                     }
                 } else {
                     "not configured".to_string()
+                }
+            }
+            crate::provider_catalog::LoginProviderTarget::GrokBuild => {
+                if self.grok_build == AuthState::Available {
+                    "Jcode-managed Grok Build backend; subscription login is verified over ACP at request time".to_string()
+                } else if grok_build::cli_available() {
+                    "subscription login not configured (backend managed by Jcode)".to_string()
+                } else {
+                    "not configured (Jcode downloads the provider backend during login)".to_string()
                 }
             }
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
@@ -826,6 +840,24 @@ impl AuthStatus {
                     AuthValidationMethod::PresenceCheck,
                 )
             }
+            crate::provider_catalog::LoginProviderTarget::GrokBuild => (
+                if state == AuthState::Available {
+                    AuthCredentialSource::LocalCliSession
+                } else {
+                    AuthCredentialSource::None
+                },
+                if state == AuthState::Available {
+                    "Grok Build subscription login managed through Jcode".to_string()
+                } else if grok_build::cli_available() {
+                    "Jcode-managed backend provisioned; subscription login not configured"
+                        .to_string()
+                } else {
+                    "Jcode-managed Grok Build backend not provisioned".to_string()
+                },
+                AuthExpiryConfidence::Unknown,
+                AuthRefreshSupport::ExternalManaged,
+                AuthValidationMethod::CommandProbe,
+            ),
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
                 // Prefer the active named config profile's credential location
                 // (set via `--provider-profile`) over the built-in profile env
@@ -972,6 +1004,13 @@ fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static
     record_auth_probe_step(&mut timings, "cursor", || {
         probe_cursor_status(&mut status, mode)
     });
+    record_auth_probe_step(&mut timings, "grok_build", || {
+        status.grok_build = if grok_build::cli_available() && grok_build::has_cached_login() {
+            AuthState::Available
+        } else {
+            AuthState::NotConfigured
+        }
+    });
     record_auth_probe_step(&mut timings, "google", || probe_google_status(&mut status));
 
     (status, timings)
@@ -985,19 +1024,6 @@ fn record_auth_probe_step(
     let step_start = Instant::now();
     probe();
     timings.push((name, step_start.elapsed().as_millis()));
-}
-
-fn token_state(result: anyhow::Result<bool>) -> AuthState {
-    match result {
-        Ok(is_expired) => {
-            if is_expired {
-                AuthState::Expired
-            } else {
-                AuthState::Available
-            }
-        }
-        Err(_) => AuthState::NotConfigured,
-    }
 }
 
 /// Auth state for an OAuth credential that refreshes automatically.
@@ -1072,7 +1098,7 @@ fn probe_anthropic_status(status: &mut AuthStatus) {
 }
 
 fn probe_openrouter_status(status: &mut AuthStatus) {
-    if crate::provider::openrouter::has_credentials() {
+    if crate::provider::openrouter::has_openrouter_credentials() {
         status.openrouter = AuthState::Available;
     }
 }
@@ -1292,6 +1318,21 @@ fn assessment_for_key(
                 AuthValidationMethod::CompositeProbe,
             )
         }
+        LoginProviderAuthStateKey::GrokBuild => (
+            if state == AuthState::Available {
+                AuthCredentialSource::LocalCliSession
+            } else {
+                AuthCredentialSource::None
+            },
+            if state == AuthState::Available {
+                "Grok CLI cached login".to_string()
+            } else {
+                "Grok CLI unavailable".to_string()
+            },
+            AuthExpiryConfidence::Unknown,
+            AuthRefreshSupport::ExternalManaged,
+            AuthValidationMethod::CommandProbe,
+        ),
         LoginProviderAuthStateKey::Google => {
             let (source, detail) = summarize_sources(vec![google_source()]);
             (

@@ -801,15 +801,54 @@ pub(super) fn handle_text_paste(app: &mut App, text: String) {
     let line_count = text.lines().count().max(1);
     if line_count < 5 {
         insert_input_text(app, &text);
-    } else {
-        app.pasted_contents.push(text);
-        let placeholder = format!(
-            "[pasted {} line{}]",
-            line_count,
-            if line_count == 1 { "" } else { "s" }
-        );
-        insert_input_text(app, &placeholder);
+        return;
     }
+    if expand_matching_paste(app, &text) {
+        return;
+    }
+
+    let placeholder = paste_placeholder(&text);
+    app.pasted_contents.push(text);
+    insert_input_text(app, &placeholder);
+}
+
+fn expand_matching_paste(app: &mut App, text: &str) -> bool {
+    let Some(content_index) = app
+        .pasted_contents
+        .iter()
+        .rposition(|content| content == text)
+    else {
+        return false;
+    };
+
+    let placeholder = paste_placeholder(text);
+    // Placeholders only encode a line count. Skip placeholders belonging to
+    // newer stored pastes with the same shape so equal-length, different text
+    // cannot cause the wrong placeholder to expand.
+    let newer_same_placeholder_count = app.pasted_contents[content_index + 1..]
+        .iter()
+        .filter(|content| paste_placeholder(content) == placeholder)
+        .count();
+    let Some(placeholder_start) = app
+        .input
+        .rmatch_indices(placeholder.as_str())
+        .map(|(position, _)| position)
+        .nth(newer_same_placeholder_count)
+    else {
+        return false;
+    };
+
+    app.follow_chat_bottom_for_typing();
+    app.remember_input_undo_state();
+    app.input.replace_range(
+        placeholder_start..placeholder_start + placeholder.len(),
+        text,
+    );
+    app.cursor_pos = placeholder_start + text.len();
+    app.pasted_contents.remove(content_index);
+    app.reset_tab_completion();
+    app.sync_model_picker_preview_from_input();
+    true
 }
 
 impl App {
@@ -1224,6 +1263,11 @@ pub(super) fn is_prompt_recall_modifier(modifiers: KeyModifiers) -> bool {
         modifiers,
         KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER
     )
+}
+
+pub(super) fn is_alternate_enter(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    code == KeyCode::Enter
+        && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::META)
 }
 
 pub(super) fn handle_prompt_history_navigation(
@@ -1793,11 +1837,11 @@ pub(super) fn is_next_prompt_new_session_hotkey(code: KeyCode, modifiers: KeyMod
     if code != KeyCode::Char(' ') {
         return false;
     }
-    // Accept either Command/Super+Space (macOS Cmd, often eaten by Spotlight) or
-    // Option/Alt+Space (macOS Option) so the fork-to-new-session arming hotkey is
-    // reachable across terminals. Reject Ctrl/Hyper combos so other chords still
-    // route to their own handlers.
-    let has_super = modifiers.contains(KeyModifiers::SUPER);
+    // Terminals report Command/Super as either SUPER or META depending on their
+    // keyboard protocol. Accept both encodings, plus Option/Alt+Space, so the
+    // shortcut remains reachable across terminals. Reject Ctrl/Hyper combos so
+    // other chords still route to their own handlers.
+    let has_super = modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::META);
     let has_alt = modifiers.contains(KeyModifiers::ALT);
     (has_super || has_alt) && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::HYPER)
 }
@@ -1902,10 +1946,6 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
         }
         KeyCode::Char('s') => {
             app.toggle_input_stash();
-            true
-        }
-        KeyCode::Char('p') => {
-            super::commands::toggle_auto_poke_hotkey_local(app);
             true
         }
         KeyCode::Char('v') => {
@@ -2234,6 +2274,10 @@ pub(super) fn handle_pre_control_shortcuts(
 
     let macos_option_shortcut =
         crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers);
+    if app.toggle_keys.auto_poke.matches(code, modifiers) {
+        super::commands::toggle_auto_poke_hotkey_local(app);
+        return true;
+    }
     if app.toggle_keys.copy_selection.matches(code, modifiers) {
         app.toggle_copy_selection_mode();
         return true;
@@ -2951,10 +2995,9 @@ impl App {
             return Ok(());
         }
 
-        // Ctrl+Enter / Cmd+Enter: does opposite of queue_mode during processing
-        if code == KeyCode::Enter
-            && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
-        {
+        // Ctrl+Enter / Cmd+Enter: does opposite of queue_mode during processing.
+        // Terminals may encode Command as either Super or Meta.
+        if is_alternate_enter(code, modifiers) {
             handle_alternate_enter(self);
             return Ok(());
         }
@@ -3724,7 +3767,8 @@ impl App {
         // Leaving the preview should happen as soon as the user acts on it.
         self.onboarding_preview_mode = false;
 
-        // Add user message to display (show placeholder to user, not full paste)
+        // Add the expanded user message to the transcript. The composer remains compact
+        // while editing, but sent turns should show the actual pasted content.
         // Remember the typed prompt so we can restore it to the input box if this
         // turn fails (e.g. "token refresh needed"), instead of dropping it.
         self.last_submitted_input = Some(raw_input.clone());
@@ -3737,7 +3781,7 @@ impl App {
 
         self.push_display_message(DisplayMessage {
             role: "user".to_string(),
-            content: raw_input, // Show placeholder to user (condensed view)
+            content: input.clone(),
             tool_calls: vec![],
             duration_secs: None,
             title: None,
