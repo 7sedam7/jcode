@@ -347,6 +347,7 @@ fn login_no_browser_flag_parses() {
             api_key,
             api_key_env,
             no_validate,
+            enterprise: _,
         }) => {
             assert!(provider.is_none());
             assert!(account.is_none());

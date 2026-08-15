@@ -6,6 +6,7 @@ pub mod claude;
 pub mod codex;
 mod commands;
 pub mod copilot;
+pub mod copilot_enterprise;
 pub mod cursor;
 pub mod doctor;
 pub mod env_facts;

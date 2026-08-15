@@ -390,7 +390,8 @@ fi
 # Standard local distribution build: Linux + macOS in parallel.
 echo "▸ Building Linux x86_64 + macOS aarch64 in parallel..."
 (
-    JCODE_RELEASE_BUILD=1 JCODE_BUILD_SEMVER="$VERSION_NUM" scripts/build_linux_compat.sh "$DIST" >/dev/null
+    JCODE_COMPAT_ARCH=x86_64 JCODE_RELEASE_BUILD=1 JCODE_BUILD_SEMVER="$VERSION_NUM" \
+        scripts/build_linux_compat.sh "$DIST" >/dev/null
     echo "  ✅ Linux done ($(elapsed)s)"
 ) &
 LINUX_PID=$!

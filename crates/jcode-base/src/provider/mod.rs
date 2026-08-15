@@ -1888,6 +1888,9 @@ impl Provider for MultiProvider {
             return self.set_model_on_provider(ActiveProvider::OpenRouter, requested_model);
         }
 
+        if let Some(routed) = self.set_model_if_copilot_catalog_owns(requested_model) {
+            return routed;
+        }
         // Normalize Copilot-style model names (dots -> hyphens) to canonical form.
         // e.g. "claude-opus-4.6" -> "claude-opus-4-6" so Anthropic accepts it.
         let model = if let Some(canonical) = normalize_copilot_model_name(requested_model) {

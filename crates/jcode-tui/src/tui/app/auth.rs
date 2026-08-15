@@ -1667,7 +1667,10 @@ impl App {
     }
 
     fn start_copilot_login(&mut self) {
-        self.set_status_notice("Login: copilot device flow...");
+        // Show which GitHub host is being used: on an enterprise deployment the
+        // codes come from that host, not github.com.
+        let deployment = crate::auth::copilot_enterprise::current_deployment();
+        self.set_status_notice(format!("Login: copilot device flow via {deployment}..."));
         self.begin_pending_login(PendingLogin::Copilot);
 
         tokio::spawn(async move {
@@ -1747,9 +1750,10 @@ impl App {
                         provider: "copilot".to_string(),
                         success: true,
                         message: format!(
-                            "Authenticated as {} via GitHub Copilot.\n\n\
+                            "Authenticated as {} via GitHub Copilot ({}).\n\n\
                              Copilot models are now available in /model.",
-                            username
+                            username,
+                            crate::auth::copilot_enterprise::current_deployment()
                         ),
                     }));
                 }

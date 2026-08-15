@@ -6,7 +6,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
-pub const COPILOT_API_VERSION: &str = "2025-04-01";
+/// `X-GitHub-Api-Version` sent on Copilot API requests.
+///
+/// Not cosmetic: measured against the live API, `2025-04-01` omits the
+/// `billing.token_prices` block from `/models` for every model, so jcode cannot
+/// know what a request costs. `2026-06-01` returns it for all of them, and is
+/// the version OpenCode sends.
+pub const COPILOT_API_VERSION: &str = "2026-06-01";
 
 /// Default model id. This must be a **Copilot catalog** id (dot-separated,
 /// e.g. `claude-sonnet-4.6`), not the Anthropic-native hyphenated form: the
@@ -14,24 +20,23 @@ pub const COPILOT_API_VERSION: &str = "2025-04-01";
 /// (issue #640). Keep this in sync with the head of [`FALLBACK_MODELS`].
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4.6";
 
+/// Legacy static model list.
+///
+/// **Deprecated** — the set of reachable Copilot models depends on the OAuth
+/// app the token was minted under and is only knowable from the live
+/// `GET /models` response.  This list is kept only for backward-compatible
+/// test stubs; production code must not gate behaviour on membership here.
 pub const FALLBACK_MODELS: &[&str] = &[
     "claude-sonnet-4.6",
     "claude-sonnet-4.5",
     "claude-haiku-4.5",
     "claude-opus-4.6",
-    "claude-opus-4.6-fast",
     "claude-opus-4.5",
     "claude-sonnet-4",
-    "gemini-3-pro-preview",
     "gpt-5.4",
-    "gpt-5.4-pro",
     "gpt-5.3-codex",
-    "gpt-5.2-codex",
-    "gpt-5.2",
-    "gpt-5.1-codex-max",
     "gpt-5.1-codex",
     "gpt-5.1",
-    "gpt-5.1-codex-mini",
     "gpt-5-mini",
     "gpt-4.1",
 ];
@@ -42,6 +47,9 @@ pub struct PersistedCatalog {
     pub fetched_at_rfc3339: String,
 }
 
+/// **Deprecated** — see [`FALLBACK_MODELS`].  Returns `true` when the id
+/// appears in the legacy static list; callers should derive from the live
+/// catalog instead.
 pub fn is_known_display_model(model: &str) -> bool {
     FALLBACK_MODELS.contains(&model)
 }

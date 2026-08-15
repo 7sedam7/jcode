@@ -700,3 +700,83 @@ fn test_apply_fallback_offer_no_offer_is_noop() {
         assert!(!app.apply_pending_fallback_offer());
     });
 }
+
+/// A provider whose context window changes after construction, the way Copilot's
+/// does once its async `/models` fetch lands.
+#[derive(Clone)]
+struct LateCatalogProvider {
+    window: StdArc<StdMutex<usize>>,
+}
+
+#[async_trait::async_trait]
+impl Provider for LateCatalogProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        unimplemented!("LateCatalogProvider")
+    }
+
+    fn name(&self) -> &str {
+        "copilot"
+    }
+
+    fn context_window(&self) -> usize {
+        *self.window.lock().unwrap()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[test]
+fn the_context_limit_catches_up_when_the_catalog_lands_late() {
+    // Copilot only learns each model's real window from an async `/models`
+    // fetch. The TUI caches `context_limit` at startup, before that answers, so
+    // without this sync the whole session budgets against the fallback number
+    // (128k) even for a model that allows 1M.
+    with_temp_jcode_home(|| {
+        let window = StdArc::new(StdMutex::new(128_000usize));
+        let provider: Arc<dyn Provider> = Arc::new(LateCatalogProvider {
+            window: window.clone(),
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.context_limit = 128_000;
+
+        assert!(
+            !app.sync_context_limit_from_provider(),
+            "no catalog change yet, so nothing should be redrawn"
+        );
+
+        *window.lock().unwrap() = 1_000_000;
+
+        assert!(
+            app.sync_context_limit_from_provider(),
+            "the limit moved, so the caller must redraw"
+        );
+        assert_eq!(app.context_limit, 1_000_000);
+
+        assert!(
+            !app.sync_context_limit_from_provider(),
+            "a second sync with no change must not churn the UI"
+        );
+    });
+}
+
+#[test]
+fn a_remote_session_keeps_its_server_supplied_context_limit() {
+    // Remote limits come from the server, not the local provider handle.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.context_limit = 777_777;
+        assert!(!app.sync_context_limit_from_provider());
+        assert_eq!(app.context_limit, 777_777);
+    });
+}

@@ -112,7 +112,10 @@ pub(crate) fn copilot_pricing(model: &str) -> RouteCheapnessEstimate {
         std::env::var("JCODE_COPILOT_PREMIUM").ok().as_deref(),
         Some("0")
     );
-    core_pricing::copilot_pricing(model, zero_premium_mode)
+    // The live catalog's per-token prices beat any table we could ship: they
+    // are the account's real prices and they change without notice.
+    let billing = crate::auth::copilot::catalog_billing_for(model);
+    core_pricing::copilot_pricing(model, zero_premium_mode, billing.as_ref())
 }
 
 pub(crate) fn openrouter_pricing_from_model_pricing(
@@ -397,6 +400,29 @@ mod tests {
             assert_eq!(estimate.billing_kind, RouteBillingKind::IncludedQuota);
             assert_eq!(estimate.confidence, RouteCostConfidence::High);
             assert_eq!(estimate.estimated_reference_cost_micros, Some(0));
+        });
+    }
+
+    /// End-to-end: prices parsed from a real `/models` response reach the
+    /// cost estimate. Before this, Copilot pricing was a static guess.
+    #[test]
+    fn copilot_pricing_uses_the_live_catalog_when_it_has_been_fetched() {
+        with_clean_provider_test_env(|| {
+            #[derive(serde::Deserialize)]
+            struct Catalog {
+                data: Vec<crate::auth::copilot::CopilotModelInfo>,
+            }
+            let catalog: Catalog = serde_json::from_str(include_str!(
+                "../../tests/fixtures/copilot_models_live.json"
+            ))
+            .expect("fixture parses");
+            crate::auth::copilot::record_catalog_billing(&catalog.data);
+
+            let estimate = copilot_pricing("claude-opus-4.6");
+            assert_eq!(estimate.source, RouteCostSource::CopilotCatalog);
+            // 500 AIC per 1M tokens -> $5/Mtok -> 5_000_000 micro-dollars.
+            assert_eq!(estimate.input_price_per_mtok_micros, Some(5_000_000));
+            assert_eq!(estimate.output_price_per_mtok_micros, Some(25_000_000));
         });
     }
 

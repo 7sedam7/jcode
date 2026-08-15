@@ -28,7 +28,8 @@ done
 
 if [[ ! -x "$DEFAULT_BINARY_PATH" ]]; then
   echo "Building Linux-compatible jcode binary into $DEFAULT_BINARY_DIR" >&2
-  "$REPO_ROOT/scripts/build_linux_compat.sh" "$DEFAULT_BINARY_DIR"
+  JCODE_COMPAT_ARCH=x86_64 \
+    "$REPO_ROOT/scripts/build_linux_compat.sh" "$DEFAULT_BINARY_DIR"
 fi
 
 OPENAI_AUTH=${JCODE_HARBOR_OPENAI_AUTH:-$HOME/.jcode/openai-auth.json}

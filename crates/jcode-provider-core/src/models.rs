@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::{LazyLock, RwLock};
+
 /// Quality-first default for Claude-capable routes.
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5";
 
@@ -126,7 +129,59 @@ fn model_id_for_capability_lookup(model: &str, provider: Option<&str>) -> (Strin
     (lookup, is_1m)
 }
 
+/// Context windows from the account's live Copilot catalog, keyed by model id.
+///
+/// Copilot entitlements are per-account: the same model id is served with
+/// different windows to different seats, so no static table can be right for
+/// everyone. The catalog is fetched by the Copilot runtime, which lives above
+/// this crate, and context limits are resolved here in a free function reached
+/// from the TUI, the compaction budget and the remote client alike. Publishing
+/// the live values into this registry is what lets all of those agree with the
+/// API instead of with a guess.
+static COPILOT_CATALOG_CONTEXT: LazyLock<RwLock<HashMap<String, usize>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Key a model id so the dotted form Copilot serves (`claude-sonnet-4.6`) and
+/// the hyphenated form jcode passes around (`claude-sonnet-4-6`) agree. The
+/// static table below carries both spellings for exactly this reason.
+fn copilot_catalog_key(model: &str) -> String {
+    model.trim().to_ascii_lowercase().replace('.', "-")
+}
+
+/// Publish context windows from a freshly fetched Copilot catalog.
+pub fn record_copilot_catalog_context_limits(limits: HashMap<String, usize>) {
+    let limits: HashMap<String, usize> = limits
+        .into_iter()
+        .filter(|(_, window)| *window > 0)
+        .map(|(id, window)| (copilot_catalog_key(&id), window))
+        .collect();
+    if limits.is_empty() {
+        return;
+    }
+    if let Ok(mut cache) = COPILOT_CATALOG_CONTEXT.write() {
+        *cache = limits;
+    }
+}
+
+/// Context window for `model` from the live Copilot catalog, if fetched.
+pub fn copilot_catalog_context_limit(model: &str) -> Option<usize> {
+    let cache = COPILOT_CATALOG_CONTEXT.read().ok()?;
+    cache.get(&copilot_catalog_key(model)).copied()
+}
+
+/// Forget the published catalog. Test-only; the process otherwise keeps the
+/// last catalog for its lifetime.
+pub fn clear_copilot_catalog_context_limits() {
+    if let Ok(mut cache) = COPILOT_CATALOG_CONTEXT.write() {
+        cache.clear();
+    }
+}
+
 fn copilot_context_limit_for_model(model: &str) -> usize {
+    // The account's own catalog beats every guess below.
+    if let Some(limit) = copilot_catalog_context_limit(model) {
+        return limit;
+    }
     match model {
         "claude-sonnet-4" | "claude-sonnet-4-6" | "claude-sonnet-4.6" => 128_000,
         "claude-opus-4-6" | "claude-opus-4.6" | "claude-opus-4.6-fast" => 200_000,

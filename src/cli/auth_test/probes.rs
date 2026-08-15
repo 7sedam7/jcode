@@ -269,16 +269,14 @@ async fn probe_copilot_auth(report: &mut AuthTestProviderReport) {
         },
     ) {
         let client = crate::provider::shared_http_client();
+        // The GitHub token is sent to the Copilot API directly, so there is no
+        // token exchange to probe. What matters is whether the token is
+        // actually accepted, which a catalog fetch answers.
         push_result_step(
             report,
-            "refresh_probe",
-            crate::auth::copilot::exchange_github_token(&client, &token).await,
-            |api_token| {
-                format!(
-                    "Exchanged GitHub token for Copilot API token (expires_at={}).",
-                    api_token.expires_at
-                )
-            },
+            "api_probe",
+            crate::auth::copilot::verify_copilot_token(&client, &token).await,
+            |_| "GitHub token accepted by the Copilot API.".to_string(),
         );
     }
 }

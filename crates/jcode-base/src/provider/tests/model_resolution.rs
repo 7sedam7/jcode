@@ -2335,3 +2335,84 @@ fn bare_openai_compatible_model_id_routes_to_its_profile_not_the_active_provider
         );
     });
 }
+
+/// A stand-in for the Copilot runtime that advertises a fixed catalog.
+#[derive(Clone)]
+struct CopilotCatalogStub {
+    catalog: Vec<String>,
+}
+
+#[async_trait::async_trait]
+impl Provider for CopilotCatalogStub {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        unimplemented!("CopilotCatalogStub")
+    }
+
+    fn name(&self) -> &str {
+        "copilot"
+    }
+
+    fn model(&self) -> String {
+        "claude-opus-4.6".to_string()
+    }
+
+    fn set_model(&self, _model: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        self.catalog.clone()
+    }
+
+    fn available_models_for_switching(&self) -> Vec<String> {
+        self.catalog.clone()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[test]
+fn copilot_catalog_membership_decides_routing_not_the_model_name() {
+    // Copilot serves upstream ids verbatim, so `gpt-5.5` and `gemini-3.6-flash`
+    // on a Copilot seat are Copilot models. Routing them by name sent the switch
+    // to OpenAI/Gemini, which are usually unauthenticated; the switch failed and
+    // Copilot silently kept serving its previous model, so every pick but the
+    // catalog default looked broken.
+    let copilot = CopilotCatalogStub {
+        catalog: vec![
+            "claude-opus-4.6".to_string(),
+            "gpt-5.5".to_string(),
+            "gemini-3.6-flash".to_string(),
+            "grok-4.5".to_string(),
+        ],
+    };
+
+    for model in ["gpt-5.5", "gemini-3.6-flash", "grok-4.5", "claude-opus-4.6"] {
+        assert!(
+            copilot_catalog_lists(&copilot, model),
+            "{model} is in the seat's catalog"
+        );
+    }
+
+    // A model the seat cannot reach must still fall through to normal routing.
+    assert!(!copilot_catalog_lists(&copilot, "gpt-4o"));
+    assert!(!copilot_catalog_lists(&copilot, ""));
+}
+
+#[test]
+fn an_empty_copilot_catalog_never_captures_a_model() {
+    // Credentials can exist before `/models` answers. Claiming every name then
+    // would strand non-Copilot models on an empty Copilot route.
+    let copilot = CopilotCatalogStub {
+        catalog: Vec::new(),
+    };
+    assert!(!copilot_catalog_lists(&copilot, "gpt-5.5"));
+}

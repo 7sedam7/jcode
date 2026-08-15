@@ -218,6 +218,17 @@ pub(super) async fn start_scriptable_login(
             )
         }
         LoginProviderTarget::Copilot => {
+            // `--complete` runs in a separate process, so the deployment must be
+            // on disk before the device flow starts: both halves have to talk to
+            // the same GitHub host.
+            let deployment = match options.copilot_enterprise_domain.as_deref() {
+                Some(domain) => {
+                    auth::copilot_enterprise::CopilotDeployment::from_domain_input(domain)?
+                }
+                None => auth::copilot_enterprise::current_deployment(),
+            };
+            auth::copilot_enterprise::save_deployment(&deployment)?;
+
             let client = crate::provider::shared_http_client();
             let device_resp = auth::copilot::initiate_device_flow(&client).await?;
             (

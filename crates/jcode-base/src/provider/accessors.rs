@@ -106,3 +106,47 @@ impl MultiProvider {
         self.provider_slot_available(provider)
     }
 }
+
+impl MultiProvider {
+    /// Route an unprefixed model to Copilot when this seat's catalog lists it.
+    ///
+    /// A Copilot seat serves upstream model ids verbatim (`gpt-5.5`,
+    /// `gemini-3.6-flash`, `claude-opus-5`), so the global name heuristics send
+    /// them to OpenAI, Gemini or Anthropic. Those are usually not authenticated:
+    /// the switch fails and Copilot silently keeps serving its previous model,
+    /// which made every pick but the catalog default look broken. Only the
+    /// account's own catalog can settle who owns a bare name.
+    ///
+    /// Returns `None` when the decision does not apply, so the caller continues
+    /// with normal routing. Explicit `<provider>:` prefixes are resolved before
+    /// this runs and still win, and an empty catalog (credentials present but
+    /// `/models` not answered yet) claims nothing.
+    pub(super) fn set_model_if_copilot_catalog_owns(
+        &self,
+        requested_model: &str,
+    ) -> Option<Result<()>> {
+        if self.active_provider() != ActiveProvider::Copilot {
+            return None;
+        }
+        let model = requested_model.trim();
+        if model.is_empty() {
+            return None;
+        }
+        let copilot = self.copilot_provider()?;
+        copilot_catalog_lists(copilot.as_ref(), model)
+            .then(|| self.set_model_on_provider(ActiveProvider::Copilot, requested_model))
+    }
+}
+
+/// Whether a Copilot seat's live catalog lists `model`.
+pub(super) fn copilot_catalog_lists(copilot: &dyn Provider, model: &str) -> bool {
+    let model = model.trim();
+    if model.is_empty() {
+        return false;
+    }
+    copilot
+        .available_models_for_switching()
+        .iter()
+        .chain(copilot.available_models_display().iter())
+        .any(|listed| listed.trim().eq_ignore_ascii_case(model))
+}

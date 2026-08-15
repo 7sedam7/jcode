@@ -635,6 +635,9 @@ jobs:
       - name: Installer conversion telemetry tests
         run: bash scripts/test_install_conversion.sh
 
+      - name: Linux compatibility builder host tests
+        run: bash scripts/test_build_linux_compat_macos.sh
+
       - name: Setup friction scorecard
         run: bash scripts/setup_friction_eval.sh
 

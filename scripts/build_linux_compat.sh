@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build a Linux x86_64 release artifact against the CentOS 7 / manylinux2014
-# glibc 2.17 baseline so the resulting binary runs on older distributions as
-# well as newer Debian/Ubuntu containers used by Terminal-Bench tasks.
+# Build a Linux release artifact matching the host architecture against the
+# CentOS 7 / manylinux2014 glibc 2.17 baseline. Set JCODE_COMPAT_ARCH to
+# x86_64 or aarch64 to override host detection.
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 out_dir="${1:-$repo_root/dist}"
@@ -17,16 +17,39 @@ if [[ "$out_dir" != /* ]]; then
   out_dir="$repo_root/$out_dir"
 fi
 
-artifact="${JCODE_COMPAT_ARTIFACT:-jcode-linux-x86_64}"
 profile="${JCODE_COMPAT_PROFILE:-release}"
-image="${JCODE_COMPAT_IMAGE:-quay.io/pypa/manylinux2014_x86_64}"
 cache_root="${JCODE_COMPAT_CACHE_DIR:-$HOME/.cache/jcode-linux-compat}"
-target="x86_64-unknown-linux-gnu"
+
+arch="${JCODE_COMPAT_ARCH:-$(uname -m)}"
+case "$arch" in
+  x86_64|amd64)
+    arch="x86_64"
+    docker_platform="linux/amd64"
+    default_artifact="jcode-linux-x86_64"
+    default_image="quay.io/pypa/manylinux2014_x86_64"
+    target="x86_64-unknown-linux-gnu"
+    ;;
+  arm64|aarch64)
+    arch="aarch64"
+    docker_platform="linux/arm64"
+    default_artifact="jcode-linux-aarch64"
+    default_image="quay.io/pypa/manylinux2014_aarch64"
+    target="aarch64-unknown-linux-gnu"
+    ;;
+  *)
+    echo "Unsupported Linux compatibility architecture: $arch" >&2
+    echo "Set JCODE_COMPAT_ARCH to x86_64 or aarch64." >&2
+    exit 1
+    ;;
+esac
+
+artifact="${JCODE_COMPAT_ARTIFACT:-$default_artifact}"
+image="${JCODE_COMPAT_IMAGE:-$default_image}"
 
 mkdir -p "$out_dir" \
   "$cache_root/cargo-registry" \
   "$cache_root/cargo-git" \
-  "$cache_root/rustup"
+  "$cache_root/rustup-$arch"
 
 host_uid="$(id -u)"
 host_gid="$(id -g)"
@@ -69,10 +92,11 @@ trap 'rm -f "$metadata_file"' EXIT
 } > "$metadata_file"
 
 echo "Building portable Linux release in Docker image: $image"
+echo "Architecture: $arch ($docker_platform, Rust target $target)"
 echo "Output dir: $out_dir"
 echo "Embedding git metadata: hash=${git_hash:-<none>} tag=${git_tag:-<none>} dirty=$git_dirty changelog_lines=$(printf '%s' "$changelog_raw" | grep -c '' || true)"
 
-docker run --rm \
+docker run --rm --platform "$docker_platform" \
   -e CARGO_TERM_COLOR=always \
   -e JCODE_RELEASE_BUILD="${JCODE_RELEASE_BUILD:-1}" \
   -e JCODE_BUILD_SEMVER="${JCODE_BUILD_SEMVER:-}" \
@@ -90,7 +114,7 @@ docker run --rm \
   -v "$out_dir:/out" \
   -v "$cache_root/cargo-registry:/root/.cargo/registry" \
   -v "$cache_root/cargo-git:/root/.cargo/git" \
-  -v "$cache_root/rustup:/root/.rustup" \
+  -v "$cache_root/rustup-$arch:/root/.rustup" \
   -w /work \
   "$image" \
   bash -lc '
@@ -142,9 +166,10 @@ docker run --rm \
 	    # host-UID/root-git ownership mismatch (CVE-2022-24765 guard).
 	    git config --global --add safe.directory /work 2>/dev/null || true
 
-	    export CARGO_TARGET_DIR=/work/target/linux-compat
+	    export CARGO_TARGET_DIR="/work/target/linux-compat-$JCODE_COMPAT_TARGET"
 	    export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
 	    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-static-libgcc}"
+	    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-static-libgcc}"
 	    cargo build --profile "$JCODE_COMPAT_PROFILE" --target "$JCODE_COMPAT_TARGET" \
 	      -p jcode --bin jcode --features linux-compat-vendored-openssl
 
@@ -185,6 +210,24 @@ WRAPPER
 	          fi
 	        done
 
+	    # Linux artifacts must be validated inside Docker when the host is macOS.
+	    if [[ -n "$JCODE_BUILD_GIT_HASH" ]]; then
+	      if ! embedded=$("/out/'"$artifact"'" --no-update --no-selfdev version 2>/dev/null \
+	        | awk -F"\t" "\$1 == \"version\" { print \$2; exit }"); then
+	        echo "error: built Linux artifact could not report its version" >&2
+	        exit 1
+	      fi
+	      if [[ -z "$embedded" ]]; then
+	        echo "error: built Linux artifact reported no version metadata" >&2
+	        exit 1
+	      fi
+	      if [[ "$embedded" != *"$JCODE_BUILD_GIT_HASH"* ]]; then
+	        echo "error: embedded build metadata reports $embedded but the tree is at $JCODE_BUILD_GIT_HASH" >&2
+	        echo "       (stale build cache; re-run after cargo clean or bump JCODE_BUILD_GIT_HASH)" >&2
+	        exit 1
+	      fi
+	    fi
+
 		    extra_libs=()
 		    for pattern in libssl.so\* libcrypto.so\*; do
 		      for lib in $pattern; do
@@ -222,20 +265,3 @@ done
 
 echo "Built artifacts:"
 ls -lh "$out_dir/$artifact" "$out_dir/$artifact.tar.gz"
-
-# Fail closed when the embedded hash does not match the tree that was built.
-# `jcode-build-meta`'s build script deliberately does not watch .git/HEAD, so a
-# cached build dir can silently embed a previous commit's hash (observed: an
-# artifact built at 268913473 reporting c9ccb4f01). Provenance that is wrong is
-# worse than provenance that is missing.
-if [[ -n "$git_hash" ]]; then
-  # `version` prints e.g. "version\tv0.61.2 (268913473)", so take the whole
-  # value rather than just the first whitespace-separated field.
-  embedded="$("$out_dir/$artifact.bin" --no-update --no-selfdev version 2>/dev/null \
-    | awk -F'\t' '$1 == "version" { print $2; exit }')"
-  if [[ -n "$embedded" && "$embedded" != *"$git_hash"* ]]; then
-    echo "error: embedded build metadata reports '$embedded' but the tree is at '$git_hash'" >&2
-    echo "       (stale build cache; re-run after 'cargo clean' or bump JCODE_BUILD_GIT_HASH)" >&2
-    exit 1
-  fi
-fi

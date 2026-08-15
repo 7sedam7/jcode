@@ -226,6 +226,11 @@ pub(crate) enum Command {
         /// Environment variable name to store/use for an OpenAI-compatible API key.
         #[arg(long)]
         api_key_env: Option<String>,
+
+        /// GitHub Enterprise domain for `--provider copilot`, e.g. `company.ghe.com`.
+        /// Authentication and the Copilot API both move to that host.
+        #[arg(long, value_name = "DOMAIN")]
+        enterprise: Option<String>,
     },
 
     /// Log in to and manage your Jcode account

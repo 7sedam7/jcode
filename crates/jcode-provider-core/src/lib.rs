@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod attempt_tracker;
 pub mod auth_mode;
 pub mod catalog_refresh;
+pub mod copilot_catalog_pricing;
 pub mod failover;
 pub mod fallback_pick;
 pub mod fingerprint;
@@ -11,6 +12,7 @@ pub mod openai_schema;
 pub mod pricing;
 pub mod reasoning;
 pub mod retry_after;
+pub mod route_cost;
 pub mod selection;
 pub mod transport;
 
@@ -40,16 +42,18 @@ pub use fingerprint::{log_provider_canonical_input, stable_hash_json, stable_has
 pub use models::{
     ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, DEFAULT_CLAUDE_MODEL,
     DEFAULT_CONTEXT_LIMIT, DEFAULT_OPENAI_MODEL, ModelCapabilities, OPENAI_API_ONLY_PRO_MODELS,
-    context_limit_for_model, context_limit_for_model_with_provider,
-    context_limit_for_model_with_provider_and_cache, is_listable_model_name,
-    is_openai_api_only_pro_model, normalize_copilot_model_name,
-    provider_for_model as core_provider_for_model,
+    clear_copilot_catalog_context_limits, context_limit_for_model,
+    context_limit_for_model_with_provider, context_limit_for_model_with_provider_and_cache,
+    copilot_catalog_context_limit, is_listable_model_name, is_openai_api_only_pro_model,
+    normalize_copilot_model_name, provider_for_model as core_provider_for_model,
     provider_for_model_with_hint as core_provider_for_model_with_hint, provider_key_from_hint,
+    record_copilot_catalog_context_limits,
 };
 pub use reasoning::{
     DEEPSEEK_SELECTABLE_EFFORTS, OPENAI_SELECTABLE_EFFORTS, OPENROUTER_SELECTABLE_EFFORTS,
     canonical_reasoning_effort, inferred_reasoning_efforts,
 };
+pub use route_cost::{RouteBillingKind, RouteCostConfidence, RouteCostSource};
 pub use selection::{
     ActiveProvider, ProviderAvailability, auto_default_provider, cli_provider_arg_for_session_key,
     dedupe_model_routes, explicit_model_provider_prefix, fallback_sequence,
@@ -1190,38 +1194,6 @@ impl ResolvedCredential {
     pub fn is_subscription(self) -> bool {
         matches!(self, Self::Oauth)
     }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RouteBillingKind {
-    Metered,
-    Subscription,
-    IncludedQuota,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RouteCostSource {
-    PublicApiPricing,
-    PublicPlanPricing,
-    RuntimePlan,
-    OpenRouterEndpoint,
-    OpenRouterCatalog,
-    /// Live models.dev pricing catalog (https://models.dev/api.json).
-    ModelsDevCatalog,
-    Heuristic,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RouteCostConfidence {
-    Exact,
-    High,
-    Medium,
-    Low,
-    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

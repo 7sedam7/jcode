@@ -6,19 +6,19 @@
 use serde::Deserialize;
 
 #[derive(Deserialize)]
-pub(crate) struct MessageStartEvent {
+pub struct MessageStartEvent {
     pub(crate) message: MessageStartMessage,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct MessageStartMessage {
+pub struct MessageStartMessage {
     #[serde(default)]
     pub(crate) model: Option<String>,
     pub(crate) usage: Option<UsageInfo>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct ContentBlockStartEvent {
+pub struct ContentBlockStartEvent {
     #[serde(rename = "index")]
     pub(crate) _index: u32,
     pub(crate) content_block: ApiContentBlockStart,
@@ -26,7 +26,7 @@ pub(crate) struct ContentBlockStartEvent {
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
-pub(crate) enum ApiContentBlockStart {
+pub enum ApiContentBlockStart {
     #[serde(rename = "text")]
     Text {
         #[serde(rename = "text")]
@@ -55,7 +55,7 @@ pub(crate) enum ApiContentBlockStart {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct ContentBlockDeltaEvent {
+pub struct ContentBlockDeltaEvent {
     #[serde(rename = "index")]
     pub(crate) _index: u32,
     pub(crate) delta: ApiDelta,
@@ -63,7 +63,7 @@ pub(crate) struct ContentBlockDeltaEvent {
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
-pub(crate) enum ApiDelta {
+pub enum ApiDelta {
     #[serde(rename = "text_delta")]
     Text { text: String },
     #[serde(rename = "input_json_delta")]
@@ -75,18 +75,18 @@ pub(crate) enum ApiDelta {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct MessageDeltaEvent {
+pub struct MessageDeltaEvent {
     pub(crate) delta: MessageDeltaDelta,
     pub(crate) usage: Option<UsageInfo>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct MessageDeltaDelta {
+pub struct MessageDeltaDelta {
     pub(crate) stop_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct UsageInfo {
+pub struct UsageInfo {
     pub(crate) input_tokens: Option<u32>,
     pub(crate) output_tokens: Option<u32>,
     pub(crate) cache_read_input_tokens: Option<u32>,

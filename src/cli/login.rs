@@ -31,6 +31,9 @@ pub struct LoginOptions {
     pub openai_compatible_api_key: Option<String>,
     pub openai_compatible_api_key_env: Option<String>,
     pub openai_compatible_default_model: Option<String>,
+    /// GitHub Enterprise domain for the Copilot device flow. `None` means
+    /// github.com unless a deployment was already configured.
+    pub copilot_enterprise_domain: Option<String>,
 }
 
 impl LoginOptions {
@@ -307,9 +310,11 @@ pub async fn run_login_provider(
                     .map(|_| LoginFlowOutcome::Completed)
             }
             LoginProviderTarget::Cursor => login_cursor_flow().map(|_| LoginFlowOutcome::Completed),
-            LoginProviderTarget::Copilot => {
-                login_copilot_flow(options.no_browser).map(|_| LoginFlowOutcome::Completed)
-            }
+            LoginProviderTarget::Copilot => login_copilot_flow(
+                options.no_browser,
+                options.copilot_enterprise_domain.clone(),
+            )
+            .map(|_| LoginFlowOutcome::Completed),
             LoginProviderTarget::Gemini => login_gemini_flow(options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
@@ -983,16 +988,39 @@ fn login_cursor_flow() -> Result<()> {
     Ok(())
 }
 
-fn login_copilot_flow(no_browser: bool) -> Result<()> {
-    eprintln!("Starting GitHub Copilot login...");
+fn login_copilot_flow(no_browser: bool, enterprise_domain: Option<String>) -> Result<()> {
+    let deployment = resolve_copilot_deployment(enterprise_domain.as_deref())?;
+    eprintln!("Starting GitHub Copilot login via {deployment}...");
 
     tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(login_copilot_device_flow(no_browser))
+        tokio::runtime::Handle::current()
+            .block_on(login_copilot_device_flow(no_browser, deployment))
     })
 }
 
-async fn login_copilot_device_flow(no_browser: bool) -> Result<()> {
+/// Decide which GitHub host to authenticate against.
+///
+/// An explicit `--enterprise` wins; otherwise keep whatever deployment is
+/// already configured, so re-running `jcode login copilot` on an enterprise
+/// setup does not silently drop the user back to github.com.
+fn resolve_copilot_deployment(
+    enterprise_domain: Option<&str>,
+) -> Result<auth::copilot_enterprise::CopilotDeployment> {
+    match enterprise_domain {
+        Some(domain) => auth::copilot_enterprise::CopilotDeployment::from_domain_input(domain),
+        None => Ok(auth::copilot_enterprise::current_deployment()),
+    }
+}
+
+async fn login_copilot_device_flow(
+    no_browser: bool,
+    deployment: auth::copilot_enterprise::CopilotDeployment,
+) -> Result<()> {
     let client = crate::provider::shared_http_client();
+
+    // Persist before the flow: every request below derives its URL from the
+    // configured deployment, so it has to be in effect while authenticating.
+    auth::copilot_enterprise::save_deployment(&deployment)?;
 
     let device_resp = crate::auth::copilot::initiate_device_flow(&client).await?;
 

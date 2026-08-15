@@ -1,25 +1,60 @@
-//! GitHub Copilot provider runtime (direct API with bearer-token exchange,
-//! tier detection, premium request modes), moved out of `jcode-base` so
+//! GitHub Copilot provider runtime (direct API with the user's GitHub token as
+//! bearer, tier detection, premium request modes), moved out of `jcode-base` so
 //! provider edits compile only this crate plus a binary relink instead of
 //! rebuilding the base -> app-core -> tui spine. The binary's composition
 //! root registers [`CopilotApiProvider`] with `jcode_base::provider::external`
 //! at startup.
 
+mod catalog;
+mod errors;
+mod messages;
+mod responses;
+mod startup;
+mod stream_chat;
+mod stream_messages;
+mod stream_responses;
+
+/// Exposed for the opt-in live integration test, which exercises the real
+/// request builder rather than a hand-written copy of it.
+pub mod testing {
+    pub use crate::messages::ANTHROPIC_BETA;
+
+    /// Build a `/v1/messages` body for a single-user-turn probe.
+    pub fn build_messages_request(
+        model: &str,
+        system: &str,
+        prompt: &str,
+        max_tokens: u32,
+    ) -> serde_json::Value {
+        let message = jcode_message_types::Message {
+            role: jcode_message_types::Role::User,
+            content: vec![jcode_message_types::ContentBlock::Text {
+                text: prompt.to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        };
+        crate::messages::build_request(model, system, &[message], &[], max_tokens, None)
+    }
+}
+
 use anyhow::Result;
 use async_trait::async_trait;
+use catalog::CatalogSpecs;
 use chrono::Utc;
 use jcode_base::auth::copilot as copilot_auth;
+use jcode_base::auth::copilot_enterprise as copilot_auth_enterprise;
 use jcode_message_types::{
     ContentBlock, Message as ChatMessage, Role, StreamEvent, ToolDefinition,
 };
+use jcode_provider_copilot::DEFAULT_MODEL;
 #[cfg(test)]
 use jcode_provider_copilot::max_token_parameter_for_model as copilot_max_token_parameter_for_model;
 use jcode_provider_copilot::{
-    COPILOT_API_VERSION, PersistedCatalog,
-    add_max_token_parameter as add_copilot_max_token_parameter,
+    COPILOT_API_VERSION, add_max_token_parameter as add_copilot_max_token_parameter,
     build_messages as build_copilot_messages, build_tools as build_copilot_tools,
 };
-use jcode_provider_copilot::{DEFAULT_MODEL, FALLBACK_MODELS};
 pub use jcode_provider_core::PremiumMode;
 use jcode_provider_core::{EventStream, Provider};
 use serde_json::{Value, json};
@@ -42,9 +77,12 @@ pub struct CopilotApiProvider {
     client: reqwest::Client,
     model: Arc<RwLock<String>>,
     github_token: String,
-    bearer_token: Arc<tokio::sync::RwLock<Option<copilot_auth::CopilotApiToken>>>,
     fetched_models: Arc<RwLock<Vec<String>>>,
+    /// Per-model endpoint + limits, as last reported by `/models`.
+    model_specs: Arc<RwLock<CatalogSpecs>>,
     catalog_source: Arc<RwLock<CatalogSource>>,
+    /// Plan GitHub reports for this seat, once the seat lookup answers.
+    account_type: Arc<RwLock<copilot_auth::CopilotAccountType>>,
     session_id: String,
     machine_id: String,
     init_ready: Arc<tokio::sync::Notify>,
@@ -52,18 +90,65 @@ pub struct CopilotApiProvider {
     premium_mode: Arc<std::sync::atomic::AtomicU8>,
     user_turn_count: Arc<std::sync::atomic::AtomicU64>,
     reasoning_effort: Arc<RwLock<Option<String>>>,
+    /// Set once a caller picks a model explicitly (`--model`, the `/model`
+    /// picker, session restore). Tier detection runs asynchronously and lands
+    /// after that choice, so without this it would overwrite the selection with
+    /// the catalog default and silently send every turn to the wrong model.
+    model_explicitly_selected: Arc<std::sync::atomic::AtomicBool>,
     created_at: std::time::Instant,
 }
 
-/// Reasoning efforts supported by Copilot's claude-sonnet-5 route,
-/// per live `/models` capabilities (issue #558).
-const SONNET5_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+/// The reasoning-effort names Copilot uses, as `&'static str`.
+///
+/// [`Provider::available_efforts`] hands back `&'static str`, but the authority
+/// on which efforts a model accepts is the live catalog, whose strings are
+/// owned. Interning the known vocabulary bridges the two without leaking a new
+/// allocation on every catalog refresh. An effort GitHub adds later is still
+/// accepted by `set_reasoning_effort` (which validates against the catalog); it
+/// just will not appear in the picker until it is listed here.
+const KNOWN_EFFORTS: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-fn copilot_model_supports_reasoning_effort(model: &str) -> bool {
-    model == "claude-sonnet-5"
+/// Declares what the request is for. Copilot uses it for quota attribution, and
+/// this is the value a coding agent sends.
+const OPENAI_INTENT: &str = "conversation-edits";
+
+fn intern_effort(effort: &str) -> Option<&'static str> {
+    KNOWN_EFFORTS
+        .iter()
+        .find(|known| known.eq_ignore_ascii_case(effort))
+        .copied()
+}
+
+/// Base URL for Copilot API requests.
+///
+/// Prefers the endpoint GitHub assigned this seat (enterprise seats are served
+/// from `api.enterprise.githubcopilot.com`), falling back to the configured
+/// deployment's default until discovery answers.
+fn request_base_url() -> String {
+    copilot_auth_enterprise::api_base()
 }
 
 impl CopilotApiProvider {
+    /// Reasoning efforts the active model accepts, per the live catalog.
+    fn efforts_for(&self, model: &str) -> Vec<String> {
+        self.model_specs
+            .read()
+            .map(|specs| specs.reasoning_efforts_for(model).to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Whether the live catalog says this model accepts image input.
+    fn model_supports_vision(&self, model: &str) -> bool {
+        self.model_specs
+            .read()
+            .map(|specs| specs.supports_vision(model))
+            .unwrap_or(false)
+    }
+
+    fn model_supports_reasoning_effort(&self, model: &str) -> bool {
+        !self.efforts_for(model).is_empty()
+    }
+
     #[cfg(test)]
     fn max_token_parameter_for_model(model: &str) -> &'static str {
         copilot_max_token_parameter_for_model(model)
@@ -80,9 +165,18 @@ impl CopilotApiProvider {
             .clone()
     }
 
+    /// The reasoning effort to send for `model`, or `None` when the user has
+    /// not chosen one or the model does not support it.
+    fn reasoning_effort_for(&self, model: &str) -> Option<String> {
+        if !self.model_supports_reasoning_effort(model) {
+            return None;
+        }
+        self.current_reasoning_effort()
+    }
+
     /// Add top-level `reasoning_effort` when set and the model supports it.
     fn add_reasoning_effort_parameter(&self, body: &mut Value, model: &str) {
-        if !copilot_model_supports_reasoning_effort(model) {
+        if !self.model_supports_reasoning_effort(model) {
             return;
         }
         if let Some(effort) = self.current_reasoning_effort() {
@@ -90,50 +184,29 @@ impl CopilotApiProvider {
         }
     }
 
-    fn persisted_catalog_path() -> Result<std::path::PathBuf> {
-        Ok(jcode_base::storage::app_config_dir()?.join("copilot_models_cache.json"))
+    /// Whether any catalog (live or cached) is loaded.
+    fn has_catalog(&self) -> bool {
+        self.fetched_models
+            .read()
+            .map(|models| !models.is_empty())
+            .unwrap_or(false)
     }
 
-    fn load_persisted_catalog() -> Option<PersistedCatalog> {
-        let path = Self::persisted_catalog_path().ok()?;
-        jcode_base::storage::read_json(&path)
-            .ok()
-            .filter(|catalog: &PersistedCatalog| !catalog.models.is_empty())
+    fn available_model_ids(&self) -> Vec<String> {
+        self.fetched_models
+            .read()
+            .map(|models| models.clone())
+            .unwrap_or_default()
     }
 
-    fn persist_catalog(models: &[String]) {
-        if models.is_empty() {
-            return;
-        }
-        let Ok(path) = Self::persisted_catalog_path() else {
-            return;
-        };
-        let payload = PersistedCatalog {
-            models: models.to_vec(),
-            fetched_at_rfc3339: Utc::now().to_rfc3339(),
-        };
-        if let Err(error) = jcode_base::storage::write_json(&path, &payload) {
-            jcode_base::logging::warn(&format!(
-                "Failed to persist Copilot model catalog {}: {}",
-                path.display(),
-                error
-            ));
-        }
-    }
-
-    fn seed_cached_catalog(&self) {
-        if let Some(catalog) = Self::load_persisted_catalog() {
-            if let Ok(mut models) = self.fetched_models.try_write() {
-                *models = catalog.models;
-            }
-            if let Ok(mut source) = self.catalog_source.try_write() {
-                *source = CatalogSource::Cached;
-            }
+    fn write_model(&self, model: String) {
+        if let Ok(mut current) = self.model.write() {
+            *current = model;
         }
     }
 
     fn model_catalog_detail_impl(&self) -> String {
-        match self
+        let source = match self
             .catalog_source
             .try_read()
             .map(|g| *g)
@@ -142,6 +215,20 @@ impl CopilotApiProvider {
             CatalogSource::Live => String::new(),
             CatalogSource::Cached => "cached live catalog".to_string(),
             CatalogSource::None => "catalog still loading".to_string(),
+        };
+
+        // The plan explains why two accounts see different models, which is
+        // otherwise the most confusing thing about Copilot.
+        let plan = self
+            .account_type
+            .try_read()
+            .map(|plan| plan.to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        match (source.is_empty(), plan.as_str()) {
+            (true, "unknown") => String::new(),
+            (true, plan) => format!("{plan} plan"),
+            (false, "unknown") => source,
+            (false, plan) => format!("{source}, {plan} plan"),
         }
     }
 
@@ -154,9 +241,10 @@ impl CopilotApiProvider {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
             github_token,
-            bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
+            model_specs: Arc::new(RwLock::new(CatalogSpecs::default())),
             catalog_source: Arc::new(RwLock::new(CatalogSource::None)),
+            account_type: Arc::new(RwLock::new(copilot_auth::CopilotAccountType::Unknown)),
             session_id: Uuid::new_v4().to_string(),
             machine_id: Self::get_or_create_machine_id(),
             init_ready: Arc::new(tokio::sync::Notify::new()),
@@ -164,6 +252,7 @@ impl CopilotApiProvider {
             premium_mode: Arc::new(std::sync::atomic::AtomicU8::new(Self::env_premium_mode())),
             user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             reasoning_effort: Arc::new(RwLock::new(None)),
+            model_explicitly_selected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             created_at: std::time::Instant::now(),
         };
         provider.seed_cached_catalog();
@@ -190,9 +279,10 @@ impl CopilotApiProvider {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
             github_token,
-            bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
+            model_specs: Arc::new(RwLock::new(CatalogSpecs::default())),
             catalog_source: Arc::new(RwLock::new(CatalogSource::None)),
+            account_type: Arc::new(RwLock::new(copilot_auth::CopilotAccountType::Unknown)),
             session_id: Uuid::new_v4().to_string(),
             machine_id: Self::get_or_create_machine_id(),
             init_ready: Arc::new(tokio::sync::Notify::new()),
@@ -200,6 +290,7 @@ impl CopilotApiProvider {
             premium_mode: Arc::new(std::sync::atomic::AtomicU8::new(Self::env_premium_mode())),
             user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             reasoning_effort: Arc::new(RwLock::new(None)),
+            model_explicitly_selected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             created_at: std::time::Instant::now(),
         };
         provider.seed_cached_catalog();
@@ -301,86 +392,6 @@ impl CopilotApiProvider {
     /// Detect the user's Copilot tier and set the best default model.
     /// Call this after construction. Fetches a bearer token and queries /models.
     /// If JCODE_COPILOT_MODEL is set, this is a no-op (user override).
-    pub async fn detect_tier_and_set_default(&self) {
-        let detect_start = std::time::Instant::now();
-        if std::env::var("JCODE_COPILOT_MODEL").is_ok() {
-            jcode_base::logging::info(
-                "Copilot model overridden via JCODE_COPILOT_MODEL, skipping tier detection",
-            );
-            self.mark_init_done();
-            return;
-        }
-
-        let bearer_start = std::time::Instant::now();
-        let bearer = match self.get_bearer_token().await {
-            Ok(t) => t,
-            Err(e) => {
-                jcode_base::logging::info(&format!(
-                    "Copilot tier detection: failed to get bearer token after {}ms: {}",
-                    bearer_start.elapsed().as_millis(),
-                    e
-                ));
-                self.mark_init_done();
-                return;
-            }
-        };
-
-        let fetch_start = std::time::Instant::now();
-        match copilot_auth::fetch_available_models(&self.client, &bearer).await {
-            Ok(models) => {
-                let picker_models: Vec<String> = models
-                    .iter()
-                    .filter(|m| m.model_picker_enabled)
-                    .map(|m| m.id.clone())
-                    .collect();
-                let all_ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
-                let default = copilot_auth::choose_default_model(&models);
-                jcode_base::logging::info(&format!(
-                    "Copilot tier detection: bearer={}ms, fetch_models={}ms, total={}ms, {} total, {} picker-enabled, default -> {}. Picker: [{}]. All: [{}]",
-                    bearer_start.elapsed().as_millis(),
-                    fetch_start.elapsed().as_millis(),
-                    detect_start.elapsed().as_millis(),
-                    all_ids.len(),
-                    picker_models.len(),
-                    default,
-                    picker_models.join(", "),
-                    all_ids.join(", ")
-                ));
-                if let Ok(mut m) = self.model.try_write() {
-                    *m = default;
-                }
-                let display_models = if picker_models.is_empty() {
-                    all_ids
-                } else {
-                    picker_models
-                };
-                if let Ok(mut fm) = self.fetched_models.try_write() {
-                    *fm = display_models;
-                }
-                if let Ok(mut source) = self.catalog_source.try_write() {
-                    *source = CatalogSource::Live;
-                }
-                Self::persist_catalog(
-                    &self
-                        .fetched_models
-                        .try_read()
-                        .map(|models| models.clone())
-                        .unwrap_or_default(),
-                );
-            }
-            Err(e) => {
-                jcode_base::logging::info(&format!(
-                    "Copilot tier detection: bearer={}ms, fetch_models={}ms, total={}ms, failed to fetch models: {}",
-                    bearer_start.elapsed().as_millis(),
-                    fetch_start.elapsed().as_millis(),
-                    detect_start.elapsed().as_millis(),
-                    e
-                ));
-            }
-        }
-        self.mark_init_done();
-    }
-
     fn mark_init_done(&self) {
         self.init_done
             .store(true, std::sync::atomic::Ordering::Release);
@@ -403,23 +414,13 @@ impl CopilotApiProvider {
         notified.await;
     }
 
-    /// Get a valid Copilot bearer token, refreshing if expired
+    /// The bearer token for Copilot API calls.
+    ///
+    /// Copilot accepts the user's GitHub OAuth token directly, so there is no
+    /// exchange step, nothing cached, and no expiry to track. A token that stops
+    /// working means the user must re-authenticate.
     async fn get_bearer_token(&self) -> Result<String> {
-        {
-            let guard = self.bearer_token.read().await;
-            if let Some(ref token) = *guard
-                && !token.is_expired()
-            {
-                return Ok(token.token.clone());
-            }
-        }
-
-        // Need to refresh
-        let new_token =
-            copilot_auth::exchange_github_token(&self.client, &self.github_token).await?;
-        let token_str = new_token.token.clone();
-        *self.bearer_token.write().await = Some(new_token);
-        Ok(token_str)
+        Ok(self.github_token.clone())
     }
 
     /// Check if an error indicates token expiration
@@ -442,6 +443,7 @@ impl CopilotApiProvider {
         &self,
         messages: Vec<Value>,
         tools: Vec<Value>,
+        raw: RawTurn,
         is_user_initiated: bool,
         tx: mpsc::Sender<Result<StreamEvent>>,
     ) {
@@ -455,11 +457,21 @@ impl CopilotApiProvider {
             .clone();
         let max_tokens: u32 = 32_768;
         let initiator = if is_user_initiated { "user" } else { "agent" };
+        let has_images = raw.has_images();
+        // A model that does not advertise vision returns an opaque 400 for image
+        // parts, so say plainly what happened instead of letting it look like a
+        // transport fault.
+        if has_images && !self.model_supports_vision(&model) {
+            jcode_base::logging::warn(&format!(
+                "Copilot model '{model}' does not advertise vision support; \
+                 the attached image will likely be rejected. Switch models with /model."
+            ));
+        }
+        let api_base = request_base_url();
 
         const MAX_RETRIES: u32 = 3;
         const RETRY_BASE_DELAY_MS: u64 = 1000;
         let mut last_error: Option<anyhow::Error> = None;
-        let mut attempted_auth_refresh = false;
 
         for attempt in 0..MAX_RETRIES {
             if attempt > 0 {
@@ -497,17 +509,60 @@ impl CopilotApiProvider {
                 }
             };
 
-            let mut body = json!({
-                "model": model,
-                "messages": messages,
-                "stream": true,
-            });
-            Self::add_max_token_parameter(&mut body, &model, max_tokens);
-            self.add_reasoning_effort_parameter(&mut body, &model);
+            // Copilot rejects a model sent to an endpoint it does not serve
+            // (HTTP 400 `unsupported_api_for_model`), so the route comes from
+            // the live catalog rather than being assumed.
+            //
+            // A model the catalog has not described yet is the dangerous case:
+            // guessing `/chat/completions` for it produces a hard 400 that no
+            // retry can fix. That happens routinely — the daemon starts with
+            // tier detection disabled and seeds from a cached catalog, so any
+            // model GitHub added since that cache was written is picker-visible
+            // but undescribed. Fetch before guessing.
+            let endpoint = self.endpoint_for_model(&model, &bearer_token).await;
 
-            if !tools.is_empty() {
-                body["tools"] = json!(tools);
-            }
+            // Never ask for more output than the model actually allows: the
+            // catalog caps range from 4k (gpt-4o) to 128k (gpt-5.x), and the
+            // caller's request is only an upper bound.
+            let effective_max_tokens = self
+                .model_specs
+                .read()
+                .ok()
+                .and_then(|specs| specs.max_output_tokens_for(&model))
+                .map(|cap| max_tokens.min(cap as u32))
+                .unwrap_or(max_tokens);
+
+            let body = match endpoint {
+                copilot_auth::CopilotEndpoint::Messages => messages::build_request(
+                    &model,
+                    &raw.system,
+                    &raw.messages,
+                    &raw.tools,
+                    effective_max_tokens,
+                    self.reasoning_effort_for(&model).as_deref(),
+                ),
+                copilot_auth::CopilotEndpoint::Responses => responses::build_request(
+                    &model,
+                    &raw.system,
+                    &raw.messages,
+                    &raw.tools,
+                    effective_max_tokens,
+                    self.reasoning_effort_for(&model).as_deref(),
+                ),
+                copilot_auth::CopilotEndpoint::ChatCompletions => {
+                    let mut body = json!({
+                        "model": model,
+                        "messages": messages,
+                        "stream": true,
+                    });
+                    Self::add_max_token_parameter(&mut body, &model, effective_max_tokens);
+                    self.add_reasoning_effort_parameter(&mut body, &model);
+                    if !tools.is_empty() {
+                        body["tools"] = json!(tools);
+                    }
+                    body
+                }
+            };
 
             let request_id = Uuid::new_v4().to_string();
 
@@ -522,29 +577,34 @@ impl CopilotApiProvider {
                 jcode_provider_core::fresh_transport_client()
             };
 
-            let resp = attempt_client
-                .post(format!(
-                    "{}/chat/completions",
-                    copilot_auth::COPILOT_API_BASE
-                ))
+            let req = attempt_client
+                .post(format!("{}{}", api_base, endpoint.path()))
                 .header("Authorization", format!("Bearer {}", bearer_token))
-                .header("Editor-Version", copilot_auth::EDITOR_VERSION)
-                .header("Editor-Plugin-Version", copilot_auth::EDITOR_PLUGIN_VERSION)
-                .header(
-                    "Copilot-Integration-Id",
-                    copilot_auth::COPILOT_INTEGRATION_ID,
-                )
                 .header("Content-Type", "application/json")
                 .header("X-Initiator", initiator)
                 .header("X-Request-Id", &request_id)
-                .header("Openai-Intent", "conversation-panel")
-                .header("Openai-Organization", "github-copilot")
                 .header("X-GitHub-Api-Version", COPILOT_API_VERSION)
-                .header("Vscode-Sessionid", &self.session_id)
-                .header("Vscode-Machineid", &self.machine_id)
-                .json(&body)
-                .send()
-                .await;
+                .header("User-Agent", copilot_auth::EDITOR_VERSION)
+                .header("Editor-Version", copilot_auth::EDITOR_VERSION)
+                .header("Openai-Intent", OPENAI_INTENT);
+
+            // Copilot rejects image parts unless the request opts in, so a turn
+            // carrying an attachment fails without this even on a vision model.
+            let req = if has_images {
+                req.header("Copilot-Vision-Request", "true")
+            } else {
+                req
+            };
+
+            // Interleaved thinking keeps reasoning coherent between tool calls
+            // on the Messages route; it is meaningless on the others.
+            let req = if endpoint == copilot_auth::CopilotEndpoint::Messages {
+                req.header("anthropic-beta", messages::ANTHROPIC_BETA)
+            } else {
+                req
+            };
+
+            let resp = req.json(&body).send().await;
 
             let resp = match resp {
                 Ok(r) => r,
@@ -570,17 +630,46 @@ impl CopilotApiProvider {
 
             let status = resp.status();
 
-            // On auth error, invalidate token and retry once
-            if Self::is_auth_error(status) && !attempted_auth_refresh {
-                attempted_auth_refresh = true;
-                *self.bearer_token.write().await = None;
-                jcode_base::logging::info("Copilot bearer token expired, refreshing...");
-                last_error = Some(anyhow::anyhow!("Copilot auth error (HTTP {})", status));
-                continue;
+            // The GitHub token is used directly, so there is nothing to refresh:
+            // a 401 means the user must re-authenticate. Retrying would only
+            // replay the same rejected credential.
+            if Self::is_auth_error(status) {
+                let body_text = jcode_base::util::http_error_body(resp, "HTTP error").await;
+                let _ = tx
+                    .send(Err(anyhow::anyhow!(
+                        "Copilot authentication failed (HTTP {status}). Run `jcode login --provider copilot` to re-authenticate: {body_text}"
+                    )))
+                    .await;
+                return;
             }
 
             if !status.is_success() {
                 let body_text = jcode_base::util::http_error_body(resp, "HTTP error").await;
+                // A stale spec, rather than a missing one: the catalog described
+                // this model with an endpoint it no longer serves, so the miss
+                // that `endpoint_for_model` refetches on never fired. Forget the
+                // spec and retry — the next attempt refetches and routes right.
+                if status == reqwest::StatusCode::BAD_REQUEST
+                    && body_text.contains(errors::UNSUPPORTED_API_FOR_MODEL)
+                    && attempt + 1 < MAX_RETRIES
+                    && self
+                        .model_specs
+                        .write()
+                        .map(|mut specs| specs.forget(&model))
+                        .unwrap_or(false)
+                {
+                    jcode_base::logging::info(&format!(
+                        "Copilot rejected {} for '{model}'; the cached catalog entry is stale, \
+                         refetching and retrying",
+                        endpoint.path()
+                    ));
+                    last_error = Some(anyhow::anyhow!(
+                        "Copilot API error (HTTP {}): {}",
+                        status,
+                        body_text
+                    ));
+                    continue;
+                }
                 let error_str =
                     format!("Copilot API error (HTTP {}): {}", status, body_text).to_lowercase();
                 if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
@@ -595,6 +684,7 @@ impl CopilotApiProvider {
                     ));
                     continue;
                 }
+                let body_text = errors::annotate(status.as_u16(), &body_text);
                 let _ = tx
                     .send(Err(anyhow::anyhow!(
                         "Copilot API error (HTTP {}): {}",
@@ -619,7 +709,10 @@ impl CopilotApiProvider {
                 jcode_provider_core::attempt_tracker::track_attempt_output(tx.clone());
 
             // Process SSE stream - returns Err on timeout/stream errors
-            match self.process_sse_stream(resp, attempt_tx).await {
+            match self
+                .process_stream(endpoint, &model, resp, attempt_tx)
+                .await
+            {
                 Ok(()) => {
                     let _ = attempt_guard.finish().await;
                     return;
@@ -676,194 +769,26 @@ impl CopilotApiProvider {
         }
     }
 
-    async fn process_sse_stream(
+    /// Decode a streaming response with the decoder that matches the wire
+    /// protocol the model is served over.
+    async fn process_stream(
         &self,
+        endpoint: copilot_auth::CopilotEndpoint,
+        model: &str,
         resp: reqwest::Response,
         tx: mpsc::Sender<Result<StreamEvent>>,
     ) -> Result<()> {
-        use futures::StreamExt;
-
-        // Idle timeout between streamed chunks. Configurable via
-        // `[provider] stream_idle_timeout_secs` / `JCODE_STREAM_IDLE_TIMEOUT_SECS`
-        // so slow reasoning models don't trip a premature timeout (issue #434).
-        let sse_chunk_timeout = jcode_base::provider::stream_idle_timeout();
-
-        let mut stream = resp.bytes_stream();
-        let mut buffer = String::new();
-        let mut current_tool_id = String::new();
-        let mut current_tool_name = String::new();
-        let mut current_tool_args = String::new();
-        let mut input_tokens: u64 = 0;
-        let mut output_tokens: u64 = 0;
-        let mut saw_any_data = false;
-
-        loop {
-            let chunk = match tokio::time::timeout(sse_chunk_timeout, stream.next()).await {
-                Ok(Some(Ok(c))) => c,
-                Ok(Some(Err(e))) => {
-                    anyhow::bail!("Stream error: {}", e);
-                }
-                Ok(None) => break, // stream ended normally
-                Err(_) => {
-                    jcode_base::logging::warn(&format!(
-                        "Copilot SSE stream timed out (no data for {}s, saw_data={})",
-                        sse_chunk_timeout.as_secs(),
-                        saw_any_data
-                    ));
-                    anyhow::bail!(
-                        "Stream read timeout: no data received for {} seconds",
-                        sse_chunk_timeout.as_secs()
-                    );
-                }
-            };
-            saw_any_data = true;
-
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-            // Process complete SSE lines
-            while let Some(line_end) = buffer.find('\n') {
-                let line = buffer[..line_end].trim_end_matches('\r').to_string();
-                buffer = buffer[line_end + 1..].to_string();
-
-                if line.is_empty() || line.starts_with(':') {
-                    continue;
-                }
-
-                if let Some(data) = jcode_base::util::sse_data_line(&line) {
-                    if data.trim() == "[DONE]" {
-                        // Send usage info before done
-                        if input_tokens > 0 || output_tokens > 0 {
-                            let _ = tx
-                                .send(Ok(StreamEvent::TokenUsage {
-                                    input_tokens: Some(input_tokens),
-                                    output_tokens: Some(output_tokens),
-                                    cache_creation_input_tokens: None,
-                                    cache_read_input_tokens: None,
-                                }))
-                                .await;
-                        }
-                        jcode_base::copilot_usage::record_request(
-                            input_tokens,
-                            output_tokens,
-                            true,
-                        );
-                        let _ = tx
-                            .send(Ok(StreamEvent::MessageEnd { stop_reason: None }))
-                            .await;
-                        return Ok(());
-                    }
-
-                    let parsed: Value = match serde_json::from_str(data) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-
-                    // Extract usage if present
-                    if let Some(usage) = parsed.get("usage") {
-                        input_tokens = usage
-                            .get("prompt_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        output_tokens = usage
-                            .get("completion_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                    }
-
-                    // Process choices
-                    if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
-                        for choice in choices {
-                            let delta = match choice.get("delta") {
-                                Some(d) => d,
-                                None => continue,
-                            };
-
-                            // Text content
-                            if let Some(content) = delta.get("content").and_then(|c| c.as_str())
-                                && !content.is_empty()
-                            {
-                                let _ = tx
-                                    .send(Ok(StreamEvent::TextDelta(content.to_string())))
-                                    .await;
-                            }
-
-                            // Tool calls
-                            if let Some(tool_calls) =
-                                delta.get("tool_calls").and_then(|t| t.as_array())
-                            {
-                                for tc in tool_calls {
-                                    // New tool call start
-                                    if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
-                                        // Flush previous tool call if any
-                                        if !current_tool_id.is_empty() {
-                                            let _ = tx.send(Ok(StreamEvent::ToolUseEnd)).await;
-                                        }
-                                        current_tool_id = id.to_string();
-                                        current_tool_name = tc
-                                            .get("function")
-                                            .and_then(|f| f.get("name"))
-                                            .and_then(|n| n.as_str())
-                                            .unwrap_or("")
-                                            .to_string();
-                                        current_tool_args.clear();
-
-                                        let _ = tx
-                                            .send(Ok(StreamEvent::ToolUseStart {
-                                                id: current_tool_id.clone(),
-                                                name: current_tool_name.clone(),
-                                            }))
-                                            .await;
-                                    }
-
-                                    // Accumulate arguments
-                                    if let Some(args) = tc
-                                        .get("function")
-                                        .and_then(|f| f.get("arguments"))
-                                        .and_then(|a| a.as_str())
-                                    {
-                                        current_tool_args.push_str(args);
-                                        let _ = tx
-                                            .send(Ok(StreamEvent::ToolInputDelta(args.to_string())))
-                                            .await;
-                                    }
-                                }
-                            }
-
-                            // Finish reason
-                            if let Some(finish) =
-                                choice.get("finish_reason").and_then(|f| f.as_str())
-                            {
-                                // Flush last tool call
-                                if !current_tool_id.is_empty() {
-                                    let _ = tx.send(Ok(StreamEvent::ToolUseEnd)).await;
-                                    current_tool_id.clear();
-                                    current_tool_name.clear();
-                                    current_tool_args.clear();
-                                }
-
-                                let stop_reason = match finish {
-                                    "stop" => "end_turn",
-                                    "tool_calls" => "tool_use",
-                                    "length" => "max_tokens",
-                                    other => other,
-                                };
-                                let _ = tx
-                                    .send(Ok(StreamEvent::MessageEnd {
-                                        stop_reason: Some(stop_reason.to_string()),
-                                    }))
-                                    .await;
-                            }
-                        }
-                    }
-                }
+        match endpoint {
+            copilot_auth::CopilotEndpoint::Messages => {
+                stream_messages::process_messages_sse_stream(resp, model, tx).await
+            }
+            copilot_auth::CopilotEndpoint::Responses => {
+                stream_responses::process_responses_sse_stream(resp, tx).await
+            }
+            copilot_auth::CopilotEndpoint::ChatCompletions => {
+                stream_chat::process_chat_sse_stream(resp, tx).await
             }
         }
-
-        // Stream ended without [DONE]
-        let _ = tx
-            .send(Ok(StreamEvent::MessageEnd { stop_reason: None }))
-            .await;
-        Ok(())
     }
 }
 
@@ -879,6 +804,31 @@ fn is_retryable_error(error_str: &str) -> bool {
         || error_str.contains("rate_limit")
         || error_str.contains("stream error")
         || error_str.contains("stream read timeout")
+}
+
+/// The turn in jcode's own representation.
+///
+/// Only the Chat Completions route consumes the pre-serialized OpenAI-shaped
+/// arrays; `/v1/messages` needs the original messages so it can serialize them
+/// into Anthropic's wire shape instead.
+struct RawTurn {
+    system: String,
+    messages: Vec<ChatMessage>,
+    tools: Vec<ToolDefinition>,
+}
+
+impl RawTurn {
+    /// Whether this turn carries image input, including images nested inside a
+    /// tool result (a screenshot returned by a tool is the common case).
+    fn has_images(&self) -> bool {
+        self.messages.iter().any(|message| {
+            message.content.iter().any(|block| match block {
+                ContentBlock::Image { .. } => true,
+                ContentBlock::ToolResult { content, .. } => content.contains("data:image/"),
+                _ => false,
+            })
+        })
+    }
 }
 
 #[async_trait]
@@ -936,15 +886,22 @@ impl Provider for CopilotApiProvider {
             &[("user_initiated", is_user_initiated.to_string())],
         );
 
+        let raw = RawTurn {
+            system: system.to_string(),
+            messages: messages.to_vec(),
+            tools: tools.to_vec(),
+        };
+
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
         let provider = CopilotApiProvider {
             client: self.client.clone(),
             model: self.model.clone(),
             github_token: self.github_token.clone(),
-            bearer_token: self.bearer_token.clone(),
             fetched_models: self.fetched_models.clone(),
+            model_specs: self.model_specs.clone(),
             catalog_source: self.catalog_source.clone(),
+            account_type: self.account_type.clone(),
             session_id: self.session_id.clone(),
             machine_id: self.machine_id.clone(),
             init_ready: self.init_ready.clone(),
@@ -952,12 +909,13 @@ impl Provider for CopilotApiProvider {
             premium_mode: self.premium_mode.clone(),
             user_turn_count: self.user_turn_count.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
+            model_explicitly_selected: self.model_explicitly_selected.clone(),
             created_at: self.created_at,
         };
 
         tokio::spawn(async move {
             provider
-                .stream_request(built_messages, built_tools, is_user_initiated, tx)
+                .stream_request(built_messages, built_tools, raw, is_user_initiated, tx)
                 .await;
         });
 
@@ -989,6 +947,10 @@ impl Provider for CopilotApiProvider {
         }
         if let Ok(mut current) = self.model.try_write() {
             *current = trimmed.to_string();
+            // Tier detection may still be in flight; record that this choice is
+            // deliberate so it does not get replaced by the catalog default.
+            self.model_explicitly_selected
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         } else {
             Err(anyhow::anyhow!(
@@ -997,31 +959,44 @@ impl Provider for CopilotApiProvider {
         }
     }
 
+    /// No static model list: see [`Self::available_models_display`]. The
+    /// reachable set is per-account, so there is nothing truthful to return
+    /// before the live catalog arrives.
     fn available_models(&self) -> Vec<&'static str> {
-        FALLBACK_MODELS.to_vec()
+        Vec::new()
     }
 
+    /// The models this account can actually reach.
+    ///
+    /// Deliberately empty until the live `/models` catalog (or the cache of a
+    /// previous one) has landed. There is no honest static answer: the reachable
+    /// set is decided by the OAuth app the token was minted under, so a
+    /// hardcoded list is wrong in both directions — it offers models the account
+    /// cannot reach, which fail with HTTP 400
+    /// `model_not_available_for_integrator` the moment they are picked, and it
+    /// hides models the account can. Callers render the empty case as a
+    /// "catalog still loading" placeholder, which is the truth.
     fn available_models_display(&self) -> Vec<String> {
-        if let Ok(models) = self.fetched_models.read()
-            && !models.is_empty()
-        {
-            return models.clone();
-        }
-        FALLBACK_MODELS
-            .iter()
-            .map(|model| model.to_string())
-            .collect()
+        self.fetched_models
+            .read()
+            .map(|models| models.clone())
+            .unwrap_or_default()
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
         self.available_models_display()
     }
 
+    /// Refresh the catalog, unless one is already loaded and still young.
+    ///
+    /// The grace window exists so a burst of startup callers does not each fire
+    /// a `/models` request. It must never suppress the *first* fetch: without a
+    /// catalog there is nothing to serve the picker, and nothing else retries.
     async fn prefetch_models(&self) -> Result<()> {
         let grace_ms = Self::startup_prefetch_grace_ms();
-        if self.created_at.elapsed().as_millis() < u128::from(grace_ms) {
+        if self.has_catalog() && self.created_at.elapsed().as_millis() < u128::from(grace_ms) {
             jcode_base::logging::info(&format!(
-                "Skipping Copilot model prefetch during startup grace window ({}ms)",
+                "Skipping Copilot model prefetch during startup grace window ({}ms); catalog already loaded",
                 grace_ms
             ));
             return Ok(());
@@ -1046,8 +1021,21 @@ impl Provider for CopilotApiProvider {
         CopilotApiProvider::get_premium_mode(self)
     }
 
+    /// Context window for the active model.
+    ///
+    /// The live catalog wins over the built-in table, which is both stale and
+    /// wrong in each direction: it understates `claude-sonnet-4.6` as 128k when
+    /// the account really gets 1M (forcing needless compaction) and overstates
+    /// legacy models like `gpt-4` (risking overflow). The table remains the
+    /// fallback for the window before the first `/models` response lands.
     fn context_window(&self) -> usize {
-        jcode_provider_core::context_limit_for_model_with_provider(&self.model(), Some(self.name()))
+        let model = self.model();
+        if let Ok(specs) = self.model_specs.read()
+            && let Some(window) = specs.context_window_for(&model)
+        {
+            return window;
+        }
+        jcode_provider_core::context_limit_for_model_with_provider(&model, Some(self.name()))
             .unwrap_or(128_000)
     }
 
@@ -1056,9 +1044,10 @@ impl Provider for CopilotApiProvider {
             client: self.client.clone(),
             model: Arc::new(RwLock::new(self.model())),
             github_token: self.github_token.clone(),
-            bearer_token: self.bearer_token.clone(),
             fetched_models: self.fetched_models.clone(),
+            model_specs: self.model_specs.clone(),
             catalog_source: self.catalog_source.clone(),
+            account_type: self.account_type.clone(),
             session_id: self.session_id.clone(),
             machine_id: self.machine_id.clone(),
             init_ready: self.init_ready.clone(),
@@ -1066,12 +1055,19 @@ impl Provider for CopilotApiProvider {
             premium_mode: self.premium_mode.clone(),
             user_turn_count: self.user_turn_count.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
+            // The fork owns its model slot, so it owns its selection state too:
+            // sharing the flag would let a fork's model change unpin the parent.
+            model_explicitly_selected: Arc::new(std::sync::atomic::AtomicBool::new(
+                self.model_explicitly_selected
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )),
             created_at: self.created_at,
         })
     }
 
     fn reasoning_effort(&self) -> Option<String> {
-        if !copilot_model_supports_reasoning_effort(&self.model()) {
+        let model = self.model();
+        if !self.model_supports_reasoning_effort(&model) {
             return None;
         }
         self.current_reasoning_effort()
@@ -1079,34 +1075,39 @@ impl Provider for CopilotApiProvider {
 
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         let model = self.model();
-        if !copilot_model_supports_reasoning_effort(&model) {
+        let supported = self.efforts_for(&model);
+        if supported.is_empty() {
             anyhow::bail!(
-                "Reasoning effort is not supported for Copilot model '{}' (only claude-sonnet-5)",
+                "Copilot model '{}' does not accept a reasoning effort",
                 model
             );
         }
         let normalized = effort.trim().to_lowercase();
-        if !SONNET5_EFFORTS.contains(&normalized.as_str()) {
+        let Some(accepted) = supported
+            .iter()
+            .find(|value| value.eq_ignore_ascii_case(&normalized))
+        else {
             anyhow::bail!(
-                "Unsupported reasoning effort '{}' for Copilot claude-sonnet-5. Supported: {}",
+                "Unsupported reasoning effort '{}' for Copilot model '{}'. Supported: {}",
                 effort,
-                SONNET5_EFFORTS.join(", ")
+                model,
+                supported.join(", ")
             );
-        }
+        };
+        let accepted = accepted.clone();
         let mut guard = self
             .reasoning_effort
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *guard = Some(normalized);
+        *guard = Some(accepted);
         Ok(())
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {
-        if copilot_model_supports_reasoning_effort(&self.model()) {
-            SONNET5_EFFORTS.to_vec()
-        } else {
-            vec![]
-        }
+        self.efforts_for(&self.model())
+            .iter()
+            .filter_map(|effort| intern_effort(effort))
+            .collect()
     }
 }
 

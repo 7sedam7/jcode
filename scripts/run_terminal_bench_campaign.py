@@ -66,7 +66,13 @@ def ensure_binary(root: Path, env: dict[str, str]) -> Path:
     binary_dir = Path(env.get("JCODE_HARBOR_BINARY_DIR", "/tmp/jcode-compat-dist")).expanduser()
     binary_path = Path(env.get("JCODE_HARBOR_BINARY", str(binary_dir / "jcode-linux-x86_64"))).expanduser()
     if not (binary_path.exists() and os.access(binary_path, os.X_OK)):
-        run([str(root / "scripts" / "build_linux_compat.sh"), str(binary_dir)], env=env, cwd=root)
+        build_env = env.copy()
+        build_env["JCODE_COMPAT_ARCH"] = "x86_64"
+        run(
+            [str(root / "scripts" / "build_linux_compat.sh"), str(binary_dir)],
+            env=build_env,
+            cwd=root,
+        )
     return binary_path.resolve()
 
 

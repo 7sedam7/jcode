@@ -325,9 +325,37 @@ Cursor uses jcode's native HTTPS transport. Copilot uses GitHub device-flow auth
   6. trusted legacy `~/.config/github-copilot/apps.json`
   7. trusted OpenCode/pi OAuth entries
   8. `gh auth token`
+- Seat detection is automatic. At startup jcode asks
+  `api.github.com/copilot_internal/user` what this seat is, and uses:
+  - the plan it reports (`individual` / `business` / `enterprise`), shown next to the
+    model in the picker; and
+  - the API endpoint it reports in `endpoints.api`, in preference to the
+    conventional `api.githubcopilot.com`. Enterprise seats are commonly served from
+    `api.enterprise.githubcopilot.com`, which no amount of guessing from the host
+    name would produce.
+
+  This means an **enterprise seat held on a personal github.com account** — the usual
+  arrangement when a company grants Copilot to your own account — needs no flag and no
+  configuration. `--enterprise` below is only for a *separate GitHub host*.
+- GitHub Enterprise (GHES / `company.ghe.com`, a different GitHub server — not the
+  same thing as an enterprise Copilot plan):
+  - Login: `jcode login --provider copilot --enterprise company.ghe.com`
+  - Accepts `company.ghe.com` or `https://company.ghe.com`. The domain is saved to
+    `<copilot config dir>/deployment.json` and reused by later sessions, so it only
+    has to be given once.
+  - On an enterprise deployment every endpoint moves off github.com:
+    device flow and token exchange go to `company.ghe.com`, the Copilot API to
+    `copilot-api.company.ghe.com` (unless the seat reports its own endpoint, which
+    wins), and the username lookup to `api.company.ghe.com`.
+  - Credentials are stored under the enterprise host in `hosts.json`, so an
+    enterprise login does not overwrite a github.com one.
+  - To go back to github.com: `jcode login --provider copilot --enterprise github.com`.
 - Env vars:
   - `JCODE_COPILOT_CLI_PATH` (optional override for CLI path)
-  - `JCODE_COPILOT_MODEL` (default: `claude-sonnet-4`)
+  - `JCODE_COPILOT_MODEL` (pin a model; must exist in your account's catalog)
+  - `GITHUB_CLIENT_ID` (OAuth app used at login; decides which models the account can reach)
+  - `GITHUB_COPILOT_ENTERPRISE_URL` (enterprise domain; overrides the saved deployment,
+    and an empty value forces github.com)
 
 ### Antigravity
 - Login: `jcode login --provider antigravity` (native Google OAuth flow; does **not** require Antigravity to be installed)

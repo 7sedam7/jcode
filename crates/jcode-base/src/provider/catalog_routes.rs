@@ -1126,10 +1126,16 @@ pub fn remote_current_openai_compatible_route_for_model(
     })
 }
 
+/// Whether a remote-advertised model should be offered a Copilot route.
+///
+/// In remote/server mode the server sends the model catalog.  Any bare id
+/// (no `/` namespace) that doesn't already have an openai-compatible profile
+/// route is a candidate — the live Copilot catalog decides what's reachable,
+/// not a stale hardcoded list.
 pub fn remote_model_should_offer_copilot_route(model: &str) -> bool {
-    remote_openai_compatible_route_for_model(model).is_none()
-        && (remote_model_is_server_copilot_only(model)
-            || super::copilot::is_known_display_model(model))
+    !model.is_empty()
+        && !model.contains('/')
+        && remote_openai_compatible_route_for_model(model).is_none()
 }
 
 pub fn remote_openai_compatible_route_for_model(model: &str) -> Option<ModelRoute> {
@@ -1605,6 +1611,43 @@ mod tests {
                 .iter()
                 .any(|r| r.model == "gpt-5.3-codex" && r.api_method == "openrouter"),
             "catalog-listed model keeps its OpenRouter fallback route"
+        );
+    }
+
+    /// Regression: models from the live Copilot catalog that are absent from
+    /// any static list must still be offered a Copilot route in remote mode.
+    /// Before the fix, `remote_model_should_offer_copilot_route` checked a
+    /// stale hardcoded list and silently dropped new catalog entries.
+    #[test]
+    fn live_catalog_models_get_copilot_route_even_when_absent_from_static_list() {
+        let _guard = EnvGuard::new();
+        // Models that exist in real Copilot catalogs but were never in FALLBACK_MODELS.
+        for model in &[
+            "gpt-5.6-sol",
+            "claude-opus-4.8",
+            "grok-4.5",
+            "mai-code-1-flash-picker",
+            "gemini-3.1-pro-preview",
+        ] {
+            assert!(
+                remote_model_should_offer_copilot_route(model),
+                "{model} must be offered a Copilot route"
+            );
+        }
+    }
+
+    /// Namespaced (slash-containing) ids must never get a Copilot route — they
+    /// belong to OpenRouter or another provider that uses namespaced ids.
+    #[test]
+    fn namespaced_model_ids_never_get_copilot_route() {
+        let _guard = EnvGuard::new();
+        assert!(
+            !remote_model_should_offer_copilot_route("openai/gpt-5.5"),
+            "namespaced id must not get a Copilot route"
+        );
+        assert!(
+            !remote_model_should_offer_copilot_route(""),
+            "empty id must not get a Copilot route"
         );
     }
 }

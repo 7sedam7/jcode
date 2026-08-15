@@ -141,6 +141,7 @@ fn tracked_env_vars() -> Vec<String> {
         "GEMINI_API_KEY",
         "CURSOR_API_KEY",
         "BEDROCK_API_KEY",
+        crate::auth::copilot_enterprise::COPILOT_ENTERPRISE_URL_ENV,
     ]
     .into_iter()
     .map(ToString::to_string)

@@ -35,9 +35,37 @@ pub fn invalidate_github_token_cache() {
     }
 }
 
-/// VSCode's OAuth client ID for GitHub Copilot device flow.
-/// This is the well-known client ID used by VS Code, OpenCode, and other tools.
+/// Default OAuth client ID for the GitHub Copilot device flow.
+///
+/// Override with the `GITHUB_CLIENT_ID` env var. The device flow uses no client
+/// secret, so a client ID is safe to embed and safe to set from the environment.
+///
+/// **This choice decides which models the account can reach.** GitHub derives a
+/// request's "integrator" identity from the OAuth app that minted the token, not
+/// from the `Copilot-Integration-Id` header, and each integrator gets its own
+/// model catalog. This default is the copilot-language-server app, whose catalog
+/// omits several current models. A token already minted under one app keeps that
+/// app's catalog, so changing this var only takes effect after re-running
+/// `jcode login --provider copilot`.
+///
+/// TODO: replace this with jcode's own registered OAuth App. It is currently VS
+/// Code's client ID, which is why the consent screen reads "Visual Studio Code".
 pub const GITHUB_COPILOT_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
+
+/// Env var overriding the Copilot device-flow client ID.
+pub const GITHUB_COPILOT_CLIENT_ID_ENV: &str = "GITHUB_CLIENT_ID";
+
+/// The OAuth client ID to use for the Copilot device flow.
+///
+/// Copilot API access is granted on the user's token, so a non-empty override is
+/// honored as-is. An unset or blank env var falls back to the default.
+pub fn github_copilot_client_id() -> String {
+    std::env::var(GITHUB_COPILOT_CLIENT_ID_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| GITHUB_COPILOT_CLIENT_ID.to_string())
+}
 
 /// GitHub endpoints for Copilot auth
 pub const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
@@ -46,6 +74,9 @@ pub const COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/
 
 /// Copilot API base URL
 pub const COPILOT_API_BASE: &str = "https://api.githubcopilot.com";
+
+/// API version sent on Copilot requests made from the auth layer.
+pub const COPILOT_AUTH_API_VERSION: &str = "2026-06-01";
 pub const COPILOT_CONFIG_JSON_SOURCE_ID: &str = "copilot_config_json";
 pub const COPILOT_HOSTS_AUTH_SOURCE_ID: &str = "copilot_hosts_json";
 pub const COPILOT_APPS_AUTH_SOURCE_ID: &str = "copilot_apps_json";
@@ -439,6 +470,11 @@ fn copilot_cli_dir() -> PathBuf {
     PathBuf::from(home).join(".copilot")
 }
 
+/// Directory holding the Copilot credential and its deployment record.
+pub(crate) fn copilot_config_dir() -> PathBuf {
+    legacy_copilot_config_dir()
+}
+
 fn legacy_copilot_config_dir() -> PathBuf {
     if let Ok(path) = std::env::var("JCODE_HOME") {
         return PathBuf::from(path)
@@ -569,6 +605,14 @@ fn select_preferred_token(
 }
 
 fn github_host_priority(raw_host: &str, normalized_host: &str) -> u8 {
+    // On an enterprise deployment its own credential must win, otherwise a
+    // leftover dotcom token gets sent to the enterprise endpoint and 401s.
+    if let Some(domain) = super::copilot_enterprise::current_deployment().enterprise_domain() {
+        if raw_host == domain || normalized_host == domain {
+            return 0;
+        }
+        return 1;
+    }
     if raw_host == "github.com" {
         0
     } else if normalized_host == "github.com" {
@@ -602,9 +646,13 @@ fn normalize_github_host_key(host: &str) -> Option<String> {
     let host = host.to_ascii_lowercase();
 
     if host == "github.com" || host == "api.github.com" || host.ends_with(".github.com") {
-        Some(host)
-    } else {
-        None
+        return Some(host);
+    }
+    // An enterprise deployment stores its credential under its own host, which
+    // is not a github.com name; without this the token is silently discarded.
+    match super::copilot_enterprise::current_deployment().enterprise_domain() {
+        Some(domain) if host == domain || host == format!("api.{domain}") => Some(host),
+        _ => None,
     }
 }
 
@@ -625,44 +673,42 @@ pub(crate) fn token_exchange_retryable_status(status: u16) -> bool {
     (500..600).contains(&status)
 }
 
-/// Exchange a GitHub OAuth token for a short-lived Copilot API bearer token.
+/// Validate a GitHub OAuth token against the Copilot API.
 ///
-/// GitHub's token service occasionally returns transient 5xx responses
-/// (see issue #548); those are retried with exponential backoff before
-/// failing. 4xx responses (bad/unauthorized token) fail immediately.
-pub async fn exchange_github_token(
-    client: &reqwest::Client,
-    github_token: &str,
-) -> Result<CopilotApiToken> {
+/// The token is sent directly as `Authorization: Bearer`; Copilot grants access
+/// on the user's own token, so there is no exchange step and nothing to refresh.
+/// `/models` is the cheapest authenticated endpoint, so it doubles as the
+/// liveness probe.
+///
+/// Transient 5xx responses are retried with exponential backoff (issue #548);
+/// 4xx responses fail immediately.
+pub async fn verify_copilot_token(client: &reqwest::Client, github_token: &str) -> Result<()> {
+    // Learn this seat's real endpoint before probing it. An enterprise seat on
+    // github.com is served from api.enterprise.githubcopilot.com, and a probe
+    // sent to the wrong base can fail for a reason that looks like a bad token.
+    let _ = super::copilot_enterprise::fetch_user_info(client, github_token).await;
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
         let resp = client
-            .get(COPILOT_TOKEN_URL)
-            .header("Authorization", format!("Token {}", github_token))
+            .get(format!("{}/models", super::copilot_enterprise::api_base()))
+            .header("Authorization", format!("Bearer {github_token}"))
             .header("User-Agent", EDITOR_VERSION)
+            .header("X-GitHub-Api-Version", COPILOT_AUTH_API_VERSION)
             .send()
             .await
-            .context("Failed to exchange GitHub token for Copilot token")?;
+            .context("Failed to reach the Copilot API")?;
 
         let status = resp.status();
         if status.is_success() {
-            let token_resp: CopilotTokenResponse = resp
-                .json()
-                .await
-                .context("Failed to parse Copilot token response")?;
-
-            return Ok(CopilotApiToken {
-                token: token_resp.token,
-                expires_at: token_resp.expires_at,
-            });
+            return Ok(());
         }
 
         let retryable = token_exchange_retryable_status(status.as_u16());
         if retryable && attempt < TOKEN_EXCHANGE_MAX_ATTEMPTS {
             let delay_ms = token_exchange_backoff_ms(attempt);
             crate::logging::warn(&format!(
-                "Copilot token exchange got transient HTTP {}, retrying in {}ms (attempt {}/{})",
+                "Copilot auth check got transient HTTP {}, retrying in {}ms (attempt {}/{})",
                 status, delay_ms, attempt, TOKEN_EXCHANGE_MAX_ATTEMPTS
             ));
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
@@ -672,13 +718,13 @@ pub async fn exchange_github_token(
         let body = crate::util::http_error_body(resp, "HTTP error").await;
         if retryable {
             anyhow::bail!(
-                "Copilot token exchange failed after {} attempts (HTTP {}): {}",
+                "Copilot auth check failed after {} attempts (HTTP {}): {}",
                 attempt,
                 status,
                 body
             );
         }
-        anyhow::bail!("Copilot token exchange failed (HTTP {}): {}", status, body);
+        anyhow::bail!("Copilot auth check failed (HTTP {}): {}", status, body);
     }
 }
 
@@ -695,10 +741,10 @@ pub async fn exchange_github_token(
 /// (whose message embeds the HTTP status, e.g. `HTTP 401`/`HTTP 403`) otherwise.
 pub async fn verify_copilot_credentials_live(client: &reqwest::Client) -> Result<()> {
     let github_token = load_github_token()?;
-    let result = exchange_github_token(client, &github_token).await;
+    let result = verify_copilot_token(client, &github_token).await;
 
     let summary = match &result {
-        Ok(_) => "copilot token exchange ok".to_string(),
+        Ok(_) => "copilot auth check ok".to_string(),
         Err(err) => format!("{err}"),
     };
     let record = crate::auth::validation::ProviderValidationRecord {
@@ -727,13 +773,12 @@ pub async fn verify_copilot_credentials_live_default() -> Result<()> {
 /// Initiate GitHub OAuth device flow for Copilot authentication.
 /// Returns the device code response with user instructions.
 pub async fn initiate_device_flow(client: &reqwest::Client) -> Result<DeviceCodeResponse> {
+    let client_id = github_copilot_client_id();
+    let deployment = super::copilot_enterprise::current_deployment();
     let resp = client
-        .post(GITHUB_DEVICE_CODE_URL)
+        .post(deployment.device_code_url())
         .header("Accept", "application/json")
-        .form(&[
-            ("client_id", GITHUB_COPILOT_CLIENT_ID),
-            ("scope", "read:user"),
-        ])
+        .form(&[("client_id", client_id.as_str()), ("scope", "read:user")])
         .send()
         .await
         .context("Failed to initiate GitHub device flow")?;
@@ -755,14 +800,16 @@ pub async fn poll_for_access_token(
     device_code: &str,
     interval: u64,
 ) -> Result<String> {
+    let client_id = github_copilot_client_id();
+    let deployment = super::copilot_enterprise::current_deployment();
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
 
         let resp = client
-            .post(GITHUB_ACCESS_TOKEN_URL)
+            .post(deployment.access_token_url())
             .header("Accept", "application/json")
             .form(&[
-                ("client_id", GITHUB_COPILOT_CLIENT_ID),
+                ("client_id", client_id.as_str()),
                 ("device_code", device_code),
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ])
@@ -819,10 +866,14 @@ pub fn save_github_token(token: &str, username: &str) -> Result<()> {
             HashMap::new()
         };
 
+    // Key by the deployment's host: an enterprise token is not valid on
+    // dotcom, so overwriting a single "github.com" entry would silently
+    // clobber one credential with the other.
+    let deployment = super::copilot_enterprise::current_deployment();
     let mut entry = HashMap::new();
     entry.insert("user".to_string(), username.to_string());
     entry.insert("oauth_token".to_string(), token.to_string());
-    config.insert("github.com".to_string(), entry);
+    config.insert(deployment.host().to_string(), entry);
 
     let json = serde_json::to_string_pretty(&config)?;
     crate::storage::write_text_secret(&hosts_path, &json)
@@ -841,117 +892,11 @@ pub fn save_github_token(token: &str, username: &str) -> Result<()> {
     Ok(())
 }
 
-/// Copilot account type - determines API base URL and available models
-#[derive(Debug, Clone, PartialEq)]
-pub enum CopilotAccountType {
-    Individual,
-    Business,
-    Enterprise,
-    Unknown,
-}
-
-impl std::fmt::Display for CopilotAccountType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CopilotAccountType::Individual => write!(f, "individual"),
-            CopilotAccountType::Business => write!(f, "business"),
-            CopilotAccountType::Enterprise => write!(f, "enterprise"),
-            CopilotAccountType::Unknown => write!(f, "unknown"),
-        }
-    }
-}
-
-/// Information about the user's Copilot subscription
-#[derive(Debug, Clone)]
-pub struct CopilotSubscriptionInfo {
-    pub account_type: CopilotAccountType,
-    pub available_models: Vec<CopilotModelInfo>,
-}
-
-/// Model info from the Copilot /models endpoint
-#[derive(Debug, Clone, Deserialize)]
-pub struct CopilotModelInfo {
-    pub id: String,
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub vendor: String,
-    #[serde(default)]
-    pub version: String,
-    #[serde(default)]
-    pub model_picker_enabled: bool,
-    #[serde(default)]
-    pub capabilities: Option<CopilotModelCapabilities>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CopilotModelCapabilities {
-    #[serde(default)]
-    pub limits: Option<CopilotModelLimits>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CopilotModelLimits {
-    #[serde(default)]
-    pub max_context_window_tokens: Option<usize>,
-    #[serde(default)]
-    pub max_output_tokens: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ModelsResponse {
-    #[serde(default)]
-    data: Vec<CopilotModelInfo>,
-}
-
-/// Fetch available models from the Copilot API.
-pub async fn fetch_available_models(
-    client: &reqwest::Client,
-    bearer_token: &str,
-) -> Result<Vec<CopilotModelInfo>> {
-    let resp = client
-        .get(format!("{}/models", COPILOT_API_BASE))
-        .header("Authorization", format!("Bearer {}", bearer_token))
-        .header("Editor-Version", EDITOR_VERSION)
-        .header("Editor-Plugin-Version", EDITOR_PLUGIN_VERSION)
-        .header("Copilot-Integration-Id", COPILOT_INTEGRATION_ID)
-        .send()
-        .await
-        .context("Failed to fetch Copilot models")?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = crate::util::http_error_body(resp, "HTTP error").await;
-        anyhow::bail!("Copilot models fetch failed (HTTP {}): {}", status, body);
-    }
-
-    let models_resp: ModelsResponse = resp
-        .json()
-        .await
-        .context("Failed to parse Copilot models response")?;
-
-    Ok(models_resp.data)
-}
-
-/// Determine the best default model based on available models.
-/// - If claude-opus-4.6 is available -> paid tier -> use claude-opus-4.6
-/// - Otherwise -> free/basic tier -> use claude-sonnet-4.6 or claude-sonnet-4
-pub fn choose_default_model(available_models: &[CopilotModelInfo]) -> String {
-    let model_ids: Vec<&str> = available_models.iter().map(|m| m.id.as_str()).collect();
-
-    if model_ids.contains(&"claude-opus-4.6") {
-        "claude-opus-4.6".to_string()
-    } else if model_ids.contains(&"claude-sonnet-4.6") {
-        "claude-sonnet-4.6".to_string()
-    } else {
-        "claude-sonnet-4".to_string()
-    }
-}
-
 /// Fetch the authenticated GitHub username using an OAuth token.
 pub async fn fetch_github_username(client: &reqwest::Client, token: &str) -> Result<String> {
+    let deployment = super::copilot_enterprise::current_deployment();
     let resp = client
-        .get("https://api.github.com/user")
+        .get(format!("{}/user", deployment.rest_api_base()))
         .header("Authorization", format!("Bearer {}", token))
         .header("User-Agent", EDITOR_VERSION)
         .send()
@@ -970,6 +915,12 @@ pub async fn fetch_github_username(client: &reqwest::Client, token: &str) -> Res
     let user: GithubUser = resp.json().await.context("Failed to parse GitHub user")?;
     Ok(user.login)
 }
+
+/// The model catalog lives in its own module. It is re-exported here so the
+/// `auth::copilot::` paths callers already use keep working.
+#[path = "copilot_catalog.rs"]
+mod catalog;
+pub use catalog::*;
 
 #[cfg(test)]
 #[path = "copilot_auth_tests.rs"]

@@ -235,7 +235,23 @@ pub fn openai_oauth_pricing(model: &str) -> RouteCheapnessEstimate {
     )
 }
 
-pub fn copilot_pricing(model: &str, zero_premium_mode: bool) -> RouteCheapnessEstimate {
+/// Copilot pricing: prefers live catalog per-token data when available,
+/// otherwise falls back to the subscription-quota heuristic.
+pub fn copilot_pricing(
+    model: &str,
+    zero_premium_mode: bool,
+    catalog_billing: Option<&crate::copilot_catalog_pricing::CopilotCatalogBilling>,
+) -> RouteCheapnessEstimate {
+    if let Some(est) = crate::copilot_catalog_pricing::estimate_from_catalog(catalog_billing) {
+        return est;
+    }
+
+    copilot_pricing_fallback(model, zero_premium_mode)
+}
+
+/// Subscription-quota heuristic used when the live catalog has no per-token
+/// pricing for a model.
+fn copilot_pricing_fallback(model: &str, zero_premium_mode: bool) -> RouteCheapnessEstimate {
     let likely_premium_model =
         model.contains("opus") || model.contains("gpt-5.5") || model.contains("gpt-5.4");
     let monthly_price = if likely_premium_model {
@@ -400,9 +416,29 @@ mod tests {
 
     #[test]
     fn copilot_zero_mode_marks_estimate_high_confidence_and_zero_reference_cost() {
-        let estimate = copilot_pricing("claude-opus-4-6", true);
+        // Fallback path (no catalog data): zero-premium still uses quota heuristic.
+        let estimate = copilot_pricing("claude-opus-4-6", true, None);
         assert_eq!(estimate.billing_kind, RouteBillingKind::IncludedQuota);
         assert_eq!(estimate.confidence, RouteCostConfidence::High);
         assert_eq!(estimate.estimated_reference_cost_micros, Some(0));
+    }
+
+    #[test]
+    fn copilot_catalog_billing_overrides_fallback() {
+        // When live catalog data is available, copilot_pricing returns metered
+        // per-token pricing instead of the subscription heuristic.
+        use crate::copilot_catalog_pricing::{CopilotCatalogBilling, CopilotTokenPricesTier};
+        let billing = CopilotCatalogBilling {
+            batch_size: 1_000_000,
+            default: CopilotTokenPricesTier {
+                input_price: 300,
+                output_price: 1500,
+                cache_price: 30,
+            },
+        };
+        let estimate = copilot_pricing("claude-sonnet-4-6", false, Some(&billing));
+        assert_eq!(estimate.billing_kind, RouteBillingKind::Metered);
+        assert_eq!(estimate.input_price_per_mtok_micros, Some(3_000_000));
+        assert_eq!(estimate.output_price_per_mtok_micros, Some(15_000_000));
     }
 }

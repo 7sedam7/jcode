@@ -323,6 +323,9 @@ fn load_token_from_json_does_not_change_external_permissions() -> Result<()> {
 fn choose_default_model_with_opus() {
     let models = vec![
         CopilotModelInfo {
+            supported_endpoints: Vec::new(),
+            policy: None,
+            billing: None,
             id: "claude-sonnet-4".to_string(),
             name: String::new(),
             vendor: String::new(),
@@ -331,6 +334,9 @@ fn choose_default_model_with_opus() {
             capabilities: Default::default(),
         },
         CopilotModelInfo {
+            supported_endpoints: Vec::new(),
+            policy: None,
+            billing: None,
             id: "claude-opus-4.6".to_string(),
             name: String::new(),
             vendor: String::new(),
@@ -345,6 +351,9 @@ fn choose_default_model_with_opus() {
 #[test]
 fn choose_default_model_without_opus() {
     let models = vec![CopilotModelInfo {
+        supported_endpoints: Vec::new(),
+        policy: None,
+        billing: None,
         id: "claude-sonnet-4.6".to_string(),
         name: String::new(),
         vendor: String::new(),
@@ -358,6 +367,9 @@ fn choose_default_model_without_opus() {
 #[test]
 fn choose_default_model_with_sonnet_4_only() {
     let models = vec![CopilotModelInfo {
+        supported_endpoints: Vec::new(),
+        policy: None,
+        billing: None,
         id: "claude-sonnet-4".to_string(),
         name: String::new(),
         vendor: String::new(),
@@ -372,6 +384,85 @@ fn choose_default_model_with_sonnet_4_only() {
 fn choose_default_model_empty_list() {
     let models: Vec<CopilotModelInfo> = vec![];
     assert_eq!(choose_default_model(&models), "claude-sonnet-4");
+}
+
+/// Helper for catalogs where only the ids matter.
+fn models_named(ids: &[&str]) -> Vec<CopilotModelInfo> {
+    ids.iter()
+        .map(|id| CopilotModelInfo {
+            supported_endpoints: Vec::new(),
+            policy: None,
+            billing: None,
+            id: (*id).to_string(),
+            name: String::new(),
+            vendor: String::new(),
+            version: String::new(),
+            model_picker_enabled: true,
+            capabilities: Default::default(),
+        })
+        .collect()
+}
+
+#[test]
+fn default_model_is_never_one_the_account_cannot_reach() {
+    // Real catalog from a token minted under the copilot-language-server OAuth
+    // app. It offers neither claude-opus-4.6 nor claude-sonnet-4.6, and the old
+    // code fell through to a hardcoded "claude-sonnet-4" that is missing too,
+    // so the first request died with `model_not_available_for_integrator`.
+    let ids = [
+        "gpt-4.1",
+        "claude-opus-4.7",
+        "claude-opus-5",
+        "gpt-5.4-mini",
+        "gpt-5.5",
+        "gpt-5.6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5-mini",
+        "gpt-3.5-turbo",
+        "gpt-4o",
+        "claude-sonnet-4.5",
+        "claude-opus-4.5",
+        "claude-haiku-4.5",
+        "gemini-2.5-pro",
+        "gpt-5.2",
+    ];
+    let models = models_named(&ids);
+    let chosen = choose_default_model(&models);
+    assert!(
+        ids.contains(&chosen.as_str()),
+        "chose '{chosen}', which the account cannot reach"
+    );
+    // Best available by preference order.
+    assert_eq!(chosen, "claude-opus-4.5");
+}
+
+#[test]
+fn default_model_falls_back_to_any_available_model() {
+    // No preferred model at all: still must pick something reachable.
+    let ids = ["gemini-2.5-pro", "gpt-4.1"];
+    let chosen = choose_default_model(&models_named(&ids));
+    assert!(
+        ids.contains(&chosen.as_str()),
+        "chose unreachable '{chosen}'"
+    );
+}
+
+#[test]
+fn default_model_skips_models_disabled_by_policy() {
+    let mut models = models_named(&["claude-opus-4.6", "claude-sonnet-4.6"]);
+    models[0].policy = Some(CopilotModelPolicy {
+        state: "disabled".to_string(),
+    });
+    // opus-4.6 ranks higher but the account cannot use it, so it must not win.
+    assert_eq!(choose_default_model(&models), "claude-sonnet-4.6");
+
+    // Any other policy state (e.g. "enabled", or the absent-policy case that
+    // covers 18 of the 38 models in the live catalog) stays selectable.
+    models[0].policy = Some(CopilotModelPolicy {
+        state: "enabled".to_string(),
+    });
+    assert_eq!(choose_default_model(&models), "claude-opus-4.6");
 }
 
 #[test]
@@ -640,4 +731,100 @@ fn token_exchange_retries_only_5xx() {
     assert!(!super::token_exchange_retryable_status(404));
     assert!(!super::token_exchange_retryable_status(429));
     assert!(!super::token_exchange_retryable_status(200));
+}
+
+struct CopilotClientIdEnvReset {
+    prev: Option<String>,
+}
+
+impl Drop for CopilotClientIdEnvReset {
+    fn drop(&mut self) {
+        if let Some(value) = &self.prev {
+            crate::env::set_var(GITHUB_COPILOT_CLIENT_ID_ENV, value);
+        } else {
+            crate::env::remove_var(GITHUB_COPILOT_CLIENT_ID_ENV);
+        }
+    }
+}
+
+fn override_copilot_client_id(value: Option<&str>) -> CopilotClientIdEnvReset {
+    let reset = CopilotClientIdEnvReset {
+        prev: std::env::var(GITHUB_COPILOT_CLIENT_ID_ENV).ok(),
+    };
+    match value {
+        Some(value) => crate::env::set_var(GITHUB_COPILOT_CLIENT_ID_ENV, value),
+        None => crate::env::remove_var(GITHUB_COPILOT_CLIENT_ID_ENV),
+    }
+    reset
+}
+
+#[test]
+fn copilot_client_id_defaults_when_env_unset() {
+    let _lock = crate::storage::lock_test_env();
+    let _reset = override_copilot_client_id(None);
+    assert_eq!(github_copilot_client_id(), GITHUB_COPILOT_CLIENT_ID);
+}
+
+#[test]
+fn copilot_client_id_uses_env_override() {
+    let _lock = crate::storage::lock_test_env();
+    let _reset = override_copilot_client_id(Some("Ov23liTestClientId"));
+    assert_eq!(github_copilot_client_id(), "Ov23liTestClientId");
+}
+
+#[test]
+fn copilot_client_id_trims_env_override() {
+    let _lock = crate::storage::lock_test_env();
+    let _reset = override_copilot_client_id(Some("  Ov23liTestClientId\n"));
+    assert_eq!(github_copilot_client_id(), "Ov23liTestClientId");
+}
+
+#[test]
+fn copilot_client_id_falls_back_when_env_blank() {
+    let _lock = crate::storage::lock_test_env();
+    let _reset = override_copilot_client_id(Some("   "));
+    assert_eq!(github_copilot_client_id(), GITHUB_COPILOT_CLIENT_ID);
+}
+
+/// A real `/models` response, captured from the live API.
+fn live_catalog() -> Vec<CopilotModelInfo> {
+    let raw = include_str!("../../tests/fixtures/copilot_models_live.json");
+    let parsed: serde_json::Value = serde_json::from_str(raw).expect("fixture is valid JSON");
+    serde_json::from_value(parsed["data"].clone()).expect("catalog parses")
+}
+
+#[test]
+fn catalog_billing_parses_real_prices() {
+    let models = live_catalog();
+    let opus = models
+        .iter()
+        .find(|m| m.id == "claude-opus-4.6")
+        .expect("fixture has claude-opus-4.6");
+    let billing = opus.catalog_billing().expect("model is priced");
+    assert_eq!(billing.batch_size, 1_000_000);
+    assert_eq!(billing.default.input_price, 500);
+    assert_eq!(billing.default.output_price, 2500);
+    assert_eq!(billing.default.cache_price, 50);
+}
+
+#[test]
+fn every_live_model_is_priced() {
+    // The catalog carries billing for every model once the request sends a
+    // recent X-GitHub-Api-Version. If this regresses, pricing silently falls
+    // back to guesswork.
+    let models = live_catalog();
+    let unpriced: Vec<&str> = models
+        .iter()
+        .filter(|m| m.catalog_billing().is_none())
+        .map(|m| m.id.as_str())
+        .collect();
+    assert!(unpriced.is_empty(), "models without prices: {unpriced:?}");
+}
+
+#[test]
+fn recorded_billing_is_readable_by_model_id() {
+    record_catalog_billing(&live_catalog());
+    let billing = catalog_billing_for("claude-opus-4.6").expect("recorded");
+    assert_eq!(billing.default.output_price, 2500);
+    assert!(catalog_billing_for("no-such-model").is_none());
 }

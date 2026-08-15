@@ -18,7 +18,7 @@ This document describes the cleanest currently-working path for running jcode on
 Many Terminal-Bench task containers use an older glibc than a locally-built host binary. The Harbor adapter should use a Linux binary produced by:
 
 ```bash
-scripts/build_linux_compat.sh /tmp/jcode-compat-dist
+JCODE_COMPAT_ARCH=x86_64 scripts/build_linux_compat.sh /tmp/jcode-compat-dist
 ```
 
 The helper script will build it for you automatically if it is missing.
