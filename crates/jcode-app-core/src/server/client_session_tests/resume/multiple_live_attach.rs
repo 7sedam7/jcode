@@ -97,7 +97,6 @@ async fn handle_resume_session_allows_multiple_live_tui_attach() -> Result<()> {
         &mut client_session_id,
         "conn_new",
         &new_agent,
-        &provider,
         &new_registry,
         &sessions,
         &shutdown_signals,

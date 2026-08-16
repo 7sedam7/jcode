@@ -1391,3 +1391,47 @@ async fn refresh_models_emits_available_models_updated_after_prefetch() {
             && route.api_method == "mock-auth"
     }));
 }
+
+#[tokio::test]
+async fn refresh_models_projects_oversized_catalog_before_direct_send() {
+    crate::bus::reset_models_updated_publish_state_for_tests();
+    let provider_impl = AuthChangeMockProvider::new();
+    *provider_impl.state.routes_override.write().unwrap() = Some(vec![ModelRoute {
+        model: "gpt-5.6-sol".to_string(),
+        provider: "Copilot".to_string(),
+        api_method: "copilot".to_string(),
+        available: true,
+        detail: "oversized optional detail".repeat(8192),
+        cheapness: None,
+    }]);
+    let provider: Arc<dyn Provider> = Arc::new(provider_impl);
+    let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), Registry::empty())));
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+
+    handle_refresh_models(8, &provider, &agent, &client_event_tx).await;
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Some(event @ ServerEvent::AvailableModelsUpdated { .. }) =
+                client_event_rx.recv().await
+            {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("receive projected catalog");
+
+    let ServerEvent::AvailableModelsUpdated {
+        available_model_routes,
+        ..
+    } = event
+    else {
+        unreachable!();
+    };
+    assert_eq!(available_model_routes.len(), 1);
+    assert!(
+        available_model_routes[0].detail.is_empty(),
+        "refresh path must use the same compact projection as bus delivery"
+    );
+}

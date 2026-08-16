@@ -47,6 +47,87 @@ fn test_handle_server_event_available_models_updated_replaces_remote_model_catal
 }
 
 #[test]
+fn test_names_only_catalog_update_clears_stale_authoritative_routes() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_remote = true;
+    app.remote_provider_name = Some("Copilot".to_string());
+    app.remote_available_entries = vec!["gpt-5.6-sol".to_string()];
+    app.remote_model_options = vec![crate::provider::ModelRoute {
+        model: "gpt-5.6-sol".to_string(),
+        provider: "OpenAI".to_string(),
+        api_method: "openai-oauth".to_string(),
+        available: true,
+        detail: String::new(),
+        cheapness: None,
+    }];
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::AvailableModelsUpdated {
+            provider_name: Some("Copilot".to_string()),
+            provider_model: Some("gpt-5.6-sol".to_string()),
+            available_models: vec!["gpt-5.6-sol".to_string()],
+            available_model_routes: Vec::new(),
+        },
+        &mut remote,
+    );
+
+    assert!(
+        app.remote_model_options.is_empty(),
+        "names-only snapshots must clear stale route ownership"
+    );
+}
+
+#[test]
+fn test_names_only_catalog_update_removes_persisted_authoritative_routes() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.is_remote = true;
+        app.remote_provider_name = Some("OpenAI".to_string());
+        app.remote_provider_model = Some("gpt-5.6-sol".to_string());
+        app.remote_available_entries = vec!["gpt-5.6-sol".to_string()];
+        app.remote_model_options = vec![crate::provider::ModelRoute {
+            model: "gpt-5.6-sol".to_string(),
+            provider: "OpenAI".to_string(),
+            api_method: "openai-oauth".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        }];
+        app.persist_remote_model_catalog_cache();
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::AvailableModelsUpdated {
+                provider_name: Some("Copilot".to_string()),
+                provider_model: Some("gpt-5.6-sol".to_string()),
+                available_models: vec!["gpt-5.6-sol".to_string()],
+                available_model_routes: Vec::new(),
+            },
+            &mut remote,
+        );
+        app.open_model_picker();
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("names-only picker should open");
+        assert!(
+            picker.entries.iter().flat_map(|entry| &entry.options).all(
+                |route| route.provider != "OpenAI" && route.api_method != "openai-oauth"
+            ),
+            "names-only update must not reload stale routes from disk"
+        );
+    });
+}
+
+#[test]
 fn test_refresh_model_list_command_shows_summary_and_status_notice() {
     let mut app = create_refresh_summary_test_app(crate::provider::ModelCatalogRefreshSummary {
         model_count_before: 12,

@@ -1964,6 +1964,53 @@ fn test_model_picker_filter_text_includes_provider_and_method() {
 }
 
 #[test]
+fn test_model_picker_filter_text_includes_canonical_route_spec() {
+    let mut entry = crate::tui::PickerEntry {
+        name: "gpt-5.6-sol".to_string(),
+        options: vec![crate::tui::PickerOption {
+            provider: "Copilot".to_string(),
+            api_method: "copilot".to_string(),
+            available: true,
+            detail: String::new(),
+            estimated_reference_cost_micros: None,
+        }],
+        action: crate::tui::PickerAction::Model,
+        selected_option: 0,
+        is_current: false,
+        is_default: false,
+        is_favorite: false,
+        recommended: false,
+        recommendation_rank: usize::MAX,
+        usage_score: 0,
+        old: false,
+        created_date: None,
+        effort: None,
+    };
+
+    let filter_text = crate::tui::PickerKind::Model.filter_text(&entry);
+    assert!(
+        filter_text
+            .split_whitespace()
+            .any(|field| field == "copilot:gpt-5.6-sol"),
+        "canonical route spec should be searchable, got: {filter_text}"
+    );
+
+    entry.name = "gpt-5.6-sol (high)".to_string();
+    entry.effort = Some("high".to_string());
+    let effort_filter_text = crate::tui::PickerKind::Model.filter_text(&entry);
+    assert!(
+        effort_filter_text
+            .split_whitespace()
+            .any(|field| field == "copilot:gpt-5.6-sol"),
+        "canonical route spec should use the model id, got: {effort_filter_text}"
+    );
+    assert!(
+        !effort_filter_text.contains("copilot:gpt-5.6-sol (high)"),
+        "canonical route spec should exclude the effort suffix, got: {effort_filter_text}"
+    );
+}
+
+#[test]
 fn test_login_picker_preview_stays_open_and_updates_filter() {
     let mut app = create_test_app();
 

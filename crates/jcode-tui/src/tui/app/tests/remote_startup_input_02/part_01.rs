@@ -191,7 +191,7 @@ fn test_model_picker_bedrock_arn_selection_prefixes_model() {
 }
 
 #[test]
-fn test_remote_fallback_bedrock_arn_does_not_create_openrouter_route() {
+fn test_remote_names_only_bedrock_arn_stays_provider_neutral() {
     let mut app = create_test_app();
     app.is_remote = true;
     let model = "arn:aws:bedrock:us-east-2:302154194530:inference-profile/us.deepseek.r1-v1:0";
@@ -200,23 +200,14 @@ fn test_remote_fallback_bedrock_arn_does_not_create_openrouter_route() {
 
     let routes = app.build_remote_model_routes_fallback();
 
-    assert!(routes.iter().any(|route| {
-        route.model == model && route.api_method == "bedrock" && route.provider == "AWS Bedrock"
-    }));
-    assert!(
-        !routes
-            .iter()
-            .any(|route| route.model == model && route.api_method == "openrouter")
-    );
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].model, model);
+    assert_eq!(routes[0].provider, "remote");
+    assert_eq!(routes[0].api_method, "remote-catalog");
 }
 
 #[test]
-fn test_remote_placeholder_only_openai_routes_are_replaced_with_real_routes() {
-    // A poisoned persisted catalog can pin OpenAI models to placeholder
-    // "remote-catalog" routes (provider "OpenAI", detail "refreshing route
-    // details…"). Opening the picker must re-synthesize the model's real
-    // routes (OpenAI OAuth/API key) instead of showing the placeholder as
-    // the only option.
+fn test_remote_placeholder_only_routes_do_not_use_local_openai_credentials() {
     with_temp_jcode_home(|| {
         crate::env::set_var("OPENAI_API_KEY", "sk-test-openai-key");
         crate::auth::AuthStatus::invalidate_cache();
@@ -240,20 +231,16 @@ fn test_remote_placeholder_only_openai_routes_are_replaced_with_real_routes() {
         crate::env::remove_var("OPENAI_API_KEY");
         crate::auth::AuthStatus::invalidate_cache();
 
-        assert!(
-            app.remote_model_options.iter().any(|route| {
-                route.model == model
-                    && crate::provider::ModelRouteApiMethod::parse(&route.api_method)
-                        .is_openai_credential_route()
-            }),
-            "expected a real OpenAI credential route for {model}, got {:?}",
-            app.remote_model_options
-        );
+        assert!(app.remote_model_options.iter().all(|route| {
+            route.model != model
+                || !crate::provider::ModelRouteApiMethod::parse(&route.api_method)
+                    .is_openai_credential_route()
+        }));
     });
 }
 
 #[test]
-fn test_remote_hydrated_catalog_restores_missing_direct_bedrock_route() {
+fn test_remote_hydrated_catalog_does_not_mix_in_local_bedrock_route() {
     with_temp_jcode_home(|| {
         let previous_enable = std::env::var_os("JCODE_BEDROCK_ENABLE");
         crate::env::set_var("JCODE_BEDROCK_ENABLE", "1");
@@ -281,11 +268,10 @@ fn test_remote_hydrated_catalog_restores_missing_direct_bedrock_route() {
         }
         crate::auth::AuthStatus::invalidate_cache();
 
-        assert!(app.remote_model_options.iter().any(|route| {
-            route.model == model
-                && route.provider == "AWS Bedrock"
-                && route.api_method == "bedrock"
-                && route.available
+        assert!(app.remote_model_options.iter().all(|route| {
+            route.model != model
+                || route.provider != "AWS Bedrock"
+                || route.api_method != "bedrock"
         }));
         assert!(app.remote_model_options.iter().any(|route| {
             route.model == model
@@ -296,7 +282,7 @@ fn test_remote_hydrated_catalog_restores_missing_direct_bedrock_route() {
 }
 
 #[test]
-fn test_remote_current_fpt_live_model_uses_fpt_route_not_copilot_without_cache() {
+fn test_remote_names_only_fpt_model_stays_provider_neutral() {
     with_temp_jcode_home(|| {
         crate::env::set_var("FPT_API_KEY", "test-fpt-key");
 
@@ -308,31 +294,16 @@ fn test_remote_current_fpt_live_model_uses_fpt_route_not_copilot_without_cache()
 
         let routes = app.build_remote_model_routes_fallback();
 
-        assert!(
-            routes.iter().any(|route| {
-                route.model == "GLM-5.1"
-                    && route.provider == "FPT AI Marketplace"
-                    && route.api_method == "openai-compatible:fpt"
-            }),
-            "FPT current-provider live model should use FPT route, got {routes:?}"
-        );
-        assert!(
-            !routes
-                .iter()
-                .any(|route| route.model == "GLM-5.1" && route.api_method == "copilot"),
-            "FPT current-provider live model must not be guessed as Copilot: {routes:?}"
-        );
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].provider, "remote");
+        assert_eq!(routes[0].api_method, "remote-catalog");
 
         crate::env::remove_var("FPT_API_KEY");
     });
 }
 
 #[test]
-fn test_remote_fallback_claude_model_gets_api_key_route_without_oauth() {
-    // A newly released Claude model can reach the picker via the names-only
-    // catalog fallback (oversized route frames are downgraded to model names).
-    // With only ANTHROPIC_API_KEY configured, the fallback must synthesize a
-    // claude-api route; previously it only ever emitted claude-oauth routes.
+fn test_remote_names_only_claude_model_ignores_local_api_key() {
     with_temp_jcode_home(|| {
         crate::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-key");
         crate::auth::AuthStatus::invalidate_cache();
@@ -344,15 +315,9 @@ fn test_remote_fallback_claude_model_gets_api_key_route_without_oauth() {
 
         let routes = app.build_remote_model_routes_fallback();
 
-        assert!(
-            routes.iter().any(|route| {
-                route.model == "claude-fable-5"
-                    && route.provider == "Anthropic"
-                    && route.api_method == "claude-api"
-                    && route.available
-            }),
-            "claude model with only an API key should get a claude-api fallback route, got {routes:?}"
-        );
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].provider, "remote");
+        assert_eq!(routes[0].api_method, "remote-catalog");
 
         crate::env::remove_var("ANTHROPIC_API_KEY");
         crate::auth::AuthStatus::invalidate_cache();
@@ -360,7 +325,7 @@ fn test_remote_fallback_claude_model_gets_api_key_route_without_oauth() {
 }
 
 #[test]
-fn test_remote_cached_oauth_only_claude_route_gains_api_key_route_in_picker() {
+fn test_remote_cached_oauth_only_claude_route_does_not_gain_local_api_key_route() {
     struct AnthropicApiKeyGuard(Option<String>);
 
     impl Drop for AnthropicApiKeyGuard {
@@ -374,10 +339,8 @@ fn test_remote_cached_oauth_only_claude_route_gains_api_key_route_in_picker() {
         }
     }
 
-    // A stale persisted catalog can carry an OAuth-only route for a newly
-    // released Claude model. When an Anthropic API key is configured, opening
-    // the picker must add the claude-api route instead of trusting the stale
-    // single-route cache forever.
+    // Remote route ownership comes from the server catalog. Local client
+    // credentials must not add a second route to that authoritative snapshot.
     with_temp_jcode_home(|| {
         let _api_key_guard =
             AnthropicApiKeyGuard(std::env::var("ANTHROPIC_API_KEY").ok());
@@ -411,13 +374,12 @@ fn test_remote_cached_oauth_only_claude_route_gains_api_key_route_in_picker() {
             })
             .collect::<Vec<_>>();
         assert!(!fable_entries.is_empty(), "fable should be in the picker");
-        assert!(
-            fable_entries.iter().any(|entry| entry.options.iter().any(
-                |option| option.api_method == "claude-api" && option.available
-            )),
-            "stale oauth-only cached route should be augmented with claude-api, got {:?}",
-            fable_entries
-        );
+        assert!(fable_entries.iter().all(|entry| {
+            entry
+                .options
+                .iter()
+                .all(|option| option.api_method != "claude-api")
+        }));
 
     });
 }
@@ -455,17 +417,11 @@ fn test_remote_jcode_subscription_catalog_is_not_augmented_with_local_auth_route
         }
         crate::auth::AuthStatus::invalidate_cache();
 
-        let expected = crate::subscription_catalog::curated_models()
-            .iter()
-            .filter(|model| {
-                crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier)
-            })
-            .map(|model| model.id)
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(app.remote_model_options.len(), expected.len());
-        assert!(app.remote_model_options.iter().all(|route| {
-            route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-                && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
+        assert_eq!(app.remote_model_options.len(), 3);
+        assert!(app.remote_model_options.iter().any(|route| {
+            route.model == "claude-opus-4-8"
+                && route.provider == "Anthropic"
+                && route.api_method == "claude-api"
                 && route.available
         }));
         assert_eq!(
@@ -473,8 +429,15 @@ fn test_remote_jcode_subscription_catalog_is_not_augmented_with_local_auth_route
                 .iter()
                 .map(|route| route.model.as_str())
                 .collect::<std::collections::BTreeSet<_>>(),
-            expected
+            std::collections::BTreeSet::from([
+                "claude-opus-4-8",
+                "gpt-5.5",
+                "gpt-5.6-sol",
+            ])
         );
+        assert!(app.remote_model_options.iter().filter(|route| {
+            matches!(route.model.as_str(), "gpt-5.5" | "gpt-5.6-sol")
+        }).all(|route| route.provider == "remote" && route.api_method == "remote-catalog"));
     });
 }
 
@@ -585,7 +548,7 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
 }
 
 #[test]
-fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
+fn test_remote_hydrated_catalog_does_not_add_client_subscription_routes() {
     with_temp_jcode_home(|| {
         let previous_key = std::env::var_os(crate::subscription_catalog::JCODE_API_KEY_ENV);
         let previous_tier = std::env::var_os(crate::subscription_catalog::JCODE_TIER_ENV);
@@ -653,29 +616,10 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
             None => crate::env::remove_var(crate::subscription_catalog::JCODE_TIER_ENV),
         }
 
-        let jcode_routes = app
-            .remote_model_options
-            .iter()
-            .filter(|route| {
-                route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-                    && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
-            })
-            .collect::<Vec<_>>();
-        let expected = crate::subscription_catalog::curated_models()
-            .iter()
-            .filter(|model| {
-                crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier)
-            })
-            .map(|model| model.id)
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(jcode_routes.len(), expected.len());
-        assert_eq!(
-            jcode_routes
-                .iter()
-                .map(|route| route.model.as_str())
-                .collect::<std::collections::BTreeSet<_>>(),
-            expected
-        );
+        assert!(app.remote_model_options.iter().all(|route| {
+            route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+                && route.api_method != crate::subscription_catalog::JCODE_ROUTE_API_METHOD
+        }));
         assert!(app.remote_model_options.iter().any(|route| {
             route.model == "claude-opus-4-8"
                 && route.provider == "Anthropic"
@@ -686,18 +630,11 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
                 && route.provider == "auto"
                 && route.api_method == "openrouter"
         }));
-        assert!(app.remote_model_options.iter().all(|route| {
-            route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-                || crate::subscription_catalog::find_curated_model(&route.model)
-                    .is_some_and(|model| {
-                        crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier)
-                    })
-        }));
     });
 }
 
 #[test]
-fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
+fn test_remote_catalog_preserves_server_advertised_all_jcode_routes() {
     with_temp_jcode_home(|| {
         let previous_tier = std::env::var_os(crate::subscription_catalog::JCODE_TIER_ENV);
         crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "plus");
@@ -732,36 +669,11 @@ fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
             None => crate::env::remove_var(crate::subscription_catalog::JCODE_TIER_ENV),
         }
 
-        let jcode_routes = app
-            .remote_model_options
-            .iter()
-            .filter(|route| {
-                route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-                    && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            jcode_routes
-                .iter()
-                .map(|route| route.model.as_str())
-                .collect::<std::collections::BTreeSet<_>>(),
-            std::collections::BTreeSet::from([
-                "claude-opus-4-8",
-                "claude-fable-5",
-                "gpt-5.5",
-                "gpt-5.6-sol",
-            ])
-        );
-        assert!(app.remote_model_options.iter().any(|route| {
-            route.model == "deepseek/deepseek-v4-pro"
-                && route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-        }));
+        assert_eq!(app.remote_model_options.len(), 5);
         assert!(app.remote_model_options.iter().all(|route| {
-            route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-                || matches!(
-                    route.model.as_str(),
-                    "claude-fable-5" | "claude-opus-4-8" | "gpt-5.5" | "gpt-5.6-sol"
-                )
+            route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+                && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
+                && route.available
         }));
     });
 }

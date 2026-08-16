@@ -1,6 +1,6 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
-use super::client_state::{handle_get_history, spawn_model_prefetch_update};
+use super::client_state::handle_get_history;
 use super::{
     ClientConnectionInfo, ClientDebugState, FileTouchService, SessionInterruptQueues, SwarmEvent,
     SwarmMember, SwarmState, VersionedPlan, broadcast_swarm_status, fanout_live_client_event,
@@ -1168,6 +1168,11 @@ async fn claim_live_target_agent(
     Some(target)
 }
 
+pub(super) struct ResumeSessionResult {
+    pub(super) agent: Arc<Mutex<Agent>>,
+    pub(super) delivered_catalog_key: Option<String>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_resume_session(
     id: u64,
@@ -1180,7 +1185,6 @@ pub(super) async fn handle_resume_session(
     client_session_id: &mut String,
     client_connection_id: &str,
     agent: &Arc<Mutex<Agent>>,
-    provider: &Arc<dyn Provider>,
     registry: &Registry,
     sessions: &SessionAgents,
     shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
@@ -1203,7 +1207,7 @@ pub(super) async fn handle_resume_session(
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
-) -> Result<Arc<Mutex<Agent>>> {
+) -> Result<ResumeSessionResult> {
     let resume_start = Instant::now();
     let incoming_client_instance_id = client_instance_id.map(str::to_string);
     crate::logging::event_info(
@@ -1373,12 +1377,11 @@ pub(super) async fn handle_resume_session(
 
         *client_session_id = session_id.clone();
 
-        handle_get_history(
+        let delivered_catalog_key = handle_get_history(
             id,
             &session_id,
             false,
             live_target_agent,
-            provider,
             sessions,
             client_connections,
             client_count,
@@ -1412,7 +1415,6 @@ pub(super) async fn handle_resume_session(
                 mcp_working_dir,
             )
             .await;
-        spawn_model_prefetch_update(Arc::clone(provider), Arc::clone(live_target_agent));
         crate::logging::event_info(
             "SESSION_LIFECYCLE",
             vec![
@@ -1425,7 +1427,10 @@ pub(super) async fn handle_resume_session(
                 ("elapsed_ms", resume_start.elapsed().as_millis().to_string()),
             ],
         );
-        return Ok(Arc::clone(live_target_agent));
+        return Ok(ResumeSessionResult {
+            agent: Arc::clone(live_target_agent),
+            delivered_catalog_key,
+        });
     }
 
     let conflicting_live_client = {
@@ -1549,7 +1554,10 @@ pub(super) async fn handle_resume_session(
                     ("elapsed_ms", resume_start.elapsed().as_millis().to_string()),
                 ],
             );
-            return Ok(Arc::clone(agent));
+            return Ok(ResumeSessionResult {
+                agent: Arc::clone(agent),
+                delivered_catalog_key: None,
+            });
         }
     }
 
@@ -1582,6 +1590,7 @@ pub(super) async fn handle_resume_session(
         registry.register_selfdev_tools().await;
     }
 
+    let mut delivered_catalog_key = None;
     match result {
         Ok(_prev_status) => {
             let old_session_id = client_session_id.clone();
@@ -1664,12 +1673,11 @@ pub(super) async fn handle_resume_session(
             )
             .await;
 
-            handle_get_history(
+            delivered_catalog_key = handle_get_history(
                 id,
                 &session_id,
                 false,
                 agent,
-                provider,
                 sessions,
                 client_connections,
                 client_count,
@@ -1698,7 +1706,6 @@ pub(super) async fn handle_resume_session(
                     mcp_working_dir,
                 )
                 .await;
-            spawn_model_prefetch_update(Arc::clone(provider), Arc::clone(agent));
             crate::logging::event_info(
                 "SESSION_LIFECYCLE",
                 vec![
@@ -1735,7 +1742,10 @@ pub(super) async fn handle_resume_session(
         }
     }
 
-    Ok(Arc::clone(agent))
+    Ok(ResumeSessionResult {
+        agent: Arc::clone(agent),
+        delivered_catalog_key,
+    })
 }
 
 #[cfg(test)]

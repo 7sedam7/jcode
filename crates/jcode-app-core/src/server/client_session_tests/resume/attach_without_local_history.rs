@@ -106,7 +106,6 @@ async fn handle_resume_session_allows_attach_without_local_history() -> Result<(
         &mut client_session_id,
         "conn_new",
         &new_agent,
-        &provider,
         &new_registry,
         &sessions,
         &shutdown_signals,

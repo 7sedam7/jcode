@@ -1156,14 +1156,24 @@ impl PickerKind {
                 let provider = route.map(|option| option.provider.as_str()).unwrap_or("");
                 let method = route.map(|option| option.api_method.as_str()).unwrap_or("");
                 let detail = route.map(|option| option.detail.as_str()).unwrap_or("");
+                let model_spec = route
+                    .map(|option| {
+                        crate::provider::MultiProvider::default_model_selection_from_route(
+                            entry.model_id(),
+                            &option.api_method,
+                            &option.provider,
+                        )
+                        .model_spec
+                    })
+                    .unwrap_or_default();
                 // Include the pretty name so a query like "opus 4.8" matches
                 // the row even though the underlying id is `claude-opus-4-8`.
                 let pretty =
                     crate::tui::app::helpers::model_names::pretty_known_model_family(&entry.name)
                         .unwrap_or_default();
                 format!(
-                    "{} {} {} {} {}",
-                    entry.name, pretty, provider, method, detail
+                    "{} {} {} {} {} {}",
+                    entry.name, pretty, provider, method, detail, model_spec
                 )
             }
         }
@@ -1468,6 +1478,17 @@ pub struct PickerEntry {
 }
 
 impl PickerEntry {
+    fn model_id(&self) -> &str {
+        if self.effort.is_some() {
+            self.name
+                .rsplit_once(" (")
+                .map(|(base, _)| base)
+                .unwrap_or(&self.name)
+        } else {
+            &self.name
+        }
+    }
+
     pub fn active_option(&self) -> Option<&PickerOption> {
         self.options.get(self.selected_option)
     }

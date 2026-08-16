@@ -104,15 +104,7 @@ pub(super) fn save_agent_model_override(
 }
 
 pub(super) fn model_entry_base_name(entry: &PickerEntry) -> String {
-    if entry.effort.is_some() {
-        entry
-            .name
-            .rsplit_once(" (")
-            .map(|(base, _)| base.to_string())
-            .unwrap_or_else(|| entry.name.clone())
-    } else {
-        entry.name.clone()
-    }
+    entry.model_id().to_string()
 }
 
 pub(super) fn openrouter_route_model_id(model: &str) -> String {

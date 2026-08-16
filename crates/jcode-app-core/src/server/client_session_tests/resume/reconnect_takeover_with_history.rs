@@ -106,7 +106,6 @@ async fn handle_resume_session_allows_reconnect_takeover_with_local_history() ->
         &mut client_session_id,
         "conn_new",
         &new_agent,
-        &provider,
         &new_registry,
         &sessions,
         &shutdown_signals,

@@ -10,8 +10,8 @@ use super::{
     build_openrouter_fallback_provider_route, configured_standard_openrouter_profile_routes,
     copilot, dedupe_model_routes, direct_openai_compatible_profile_routes,
     format_account_model_availability_detail, is_listable_model_name, known_anthropic_model_ids,
-    known_openai_model_ids, model_availability_for_account, openrouter,
-    openrouter_catalog_model_id, provider_for_model, standard_openrouter_profile_configured,
+    known_openai_model_ids, model_availability_for_account, openrouter, provider_for_model,
+    standard_openrouter_profile_configured,
 };
 
 /// Build the fast local route snapshot used by the TUI model picker while the
@@ -850,233 +850,15 @@ pub fn remote_model_routes_fallback(
     remote_provider_name: Option<&str>,
     remote_available_entries: &[String],
 ) -> Vec<ModelRoute> {
-    if remote_provider_name.is_some_and(|name| {
-        name.eq_ignore_ascii_case(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME)
-    }) {
-        return remote_available_entries
-            .iter()
-            .filter(|model| is_listable_model_name(model))
-            .map(|model| ModelRoute {
-                model: model.clone(),
-                provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
-                api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
-                available: true,
-                detail: "jcode subscription routing · managed server-side".to_string(),
-                cheapness: None,
-            })
-            .collect();
-    }
-
-    let auth = AuthStatus::check_fast();
-    let mut routes = Vec::new();
-    for model in remote_available_entries {
-        if !is_listable_model_name(model) {
-            continue;
-        }
-
-        let openrouter_catalog_model = openrouter_catalog_model_id(model);
-        let openrouter_cached = openrouter_catalog_model
-            .as_deref()
-            .and_then(openrouter::load_endpoints_disk_cache_public);
-
-        if super::bedrock::BedrockProvider::is_bedrock_model_id(model) {
-            let available = auth.bedrock != AuthState::NotConfigured
-                || super::bedrock::BedrockProvider::has_credentials();
-            routes.push(ModelRoute {
-                model: model.clone(),
-                provider: "AWS Bedrock".to_string(),
-                api_method: "bedrock".to_string(),
-                available,
-                detail: if available {
-                    String::new()
-                } else {
-                    "no Bedrock credentials or region; run /login bedrock".to_string()
-                },
-                cheapness: None,
-            });
-            continue;
-        }
-
-        if model.contains('/')
-            && let Some(route) = remote_openai_compatible_route_for_model(model)
-        {
-            routes.push(route);
-            continue;
-        }
-
-        if model.contains('/') {
-            let cached = openrouter_cached;
-            let auto_detail = cached
-                .as_ref()
-                .and_then(|(eps, _)| eps.first().map(|ep| format!("→ {}", ep.provider_name)))
-                .unwrap_or_default();
-            routes.push(build_openrouter_auto_route(
-                model,
-                auth.openrouter != AuthState::NotConfigured,
-                auto_detail,
-            ));
-            if let Some((endpoints, age)) = cached {
-                let age_str = if age < 3600 {
-                    format!("{}m ago", age / 60)
-                } else if age < 86400 {
-                    format!("{}h ago", age / 3600)
-                } else {
-                    format!("{}d ago", age / 86400)
-                };
-                for ep in &endpoints {
-                    routes.push(build_openrouter_endpoint_route(
-                        model,
-                        ep,
-                        auth.openrouter != AuthState::NotConfigured,
-                        Some(&age_str),
-                    ));
-                }
-            }
-            continue;
-        }
-
-        let mut added_any = false;
-
-        if provider_for_model(model) == Some("claude") {
-            if auth.anthropic.has_oauth {
-                let (available, detail) = anthropic_oauth_route_availability(model);
-                routes.push(build_anthropic_oauth_route(model, available, detail));
-                added_any = true;
-            }
-            // An Anthropic API key is an equally valid direct route. Without
-            // this, a model that only reaches the picker via the names-only
-            // fallback path (e.g. a newly released model whose detailed route
-            // frame was oversized) shows an OAuth route but silently loses its
-            // API-key route even though the key works.
-            if auth.anthropic.has_api_key {
-                let (available, detail) = anthropic_api_key_route_availability(model);
-                routes.push(ModelRoute {
-                    model: model.clone(),
-                    provider: "Anthropic".to_string(),
-                    api_method: "claude-api".to_string(),
-                    available,
-                    detail,
-                    cheapness: cheapness_for_route(model, "Anthropic", "claude-api"),
-                });
-                added_any = true;
-            }
-        }
-
-        if jcode_provider_core::model_id::matches_known_model(model, ALL_OPENAI_MODELS) {
-            let availability = model_availability_for_account(model);
-            let (available, detail) = if auth.openai == AuthState::NotConfigured {
-                (false, "no credentials".to_string())
-            } else {
-                match availability.state {
-                    AccountModelAvailabilityState::Available => (true, String::new()),
-                    AccountModelAvailabilityState::Unavailable => (
-                        false,
-                        format_account_model_availability_detail(&availability)
-                            .unwrap_or_else(|| "not available".to_string()),
-                    ),
-                    AccountModelAvailabilityState::Unknown => (
-                        true,
-                        format_account_model_availability_detail(&availability)
-                            .unwrap_or_else(|| "availability unknown".to_string()),
-                    ),
-                }
-            };
-            routes.push(build_openai_oauth_route(model, available, detail));
-            added_any = true;
-        }
-
-        if auth.openrouter != AuthState::NotConfigured {
-            let catalog_lists_model = openrouter_catalog_model
-                .as_deref()
-                .and_then(openrouter::standard_catalog_lists_model);
-            match (provider_for_model(model), openrouter_cached.as_ref()) {
-                (_, Some((endpoints, _age))) => {
-                    for ep in endpoints {
-                        routes.push(build_openrouter_endpoint_route(model, ep, true, None));
-                    }
-                    added_any = true;
-                }
-                // Skip fallback routes for models the OpenRouter catalog
-                // definitively does not list (e.g. gpt-5.3-codex-spark).
-                (Some("claude"), None) if catalog_lists_model != Some(false) => {
-                    routes.push(build_openrouter_fallback_provider_route(
-                        model,
-                        openrouter_catalog_model.as_deref().unwrap_or(model),
-                        "Anthropic",
-                    ));
-                    added_any = true;
-                }
-                (Some("openai"), None) if catalog_lists_model != Some(false) => {
-                    routes.push(build_openrouter_fallback_provider_route(
-                        model,
-                        openrouter_catalog_model.as_deref().unwrap_or(model),
-                        "OpenAI",
-                    ));
-                    added_any = true;
-                }
-                _ => {}
-            }
-        }
-
-        if let Some(route) = remote_openai_compatible_route_for_model(model) {
-            routes.push(route);
-            added_any = true;
-        }
-
-        if !added_any
-            && let Some(route) =
-                remote_current_openai_compatible_route_for_model(remote_provider_name, model)
-        {
-            routes.push(route);
-            added_any = true;
-        }
-
-        if !added_any && remote_model_should_offer_copilot_route(model) && !model.contains("[1m]") {
-            routes.push(build_copilot_route(
-                model,
-                auth.copilot == AuthState::Available || remote_model_is_server_copilot_only(model),
-                String::new(),
-            ));
-            added_any = true;
-        }
-
-        if super::gemini::is_gemini_model_id(model) {
-            routes.push(ModelRoute {
-                model: model.clone(),
-                provider: "Gemini".to_string(),
-                api_method: "code-assist-oauth".to_string(),
-                available: auth.gemini == AuthState::Available,
-                detail: String::new(),
-                cheapness: None,
-            });
-            added_any = true;
-        }
-
-        if !added_any {
-            routes.push(ModelRoute {
-                model: model.clone(),
-                provider: "unknown".to_string(),
-                api_method: "unknown".to_string(),
-                available: false,
-                detail: "no matching configured provider route".to_string(),
-                cheapness: None,
-            });
-        }
-    }
-    routes
+    remote_model_routes_lightweight_fallback(remote_provider_name, remote_available_entries, "")
 }
 
 pub fn remote_model_routes_lightweight_fallback(
-    remote_provider_name: Option<&str>,
+    _remote_provider_name: Option<&str>,
     remote_available_entries: &[String],
     current_model: &str,
 ) -> Vec<ModelRoute> {
-    let is_jcode_subscription = remote_provider_name.is_some_and(|name| {
-        name.eq_ignore_ascii_case(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME)
-    });
-    let provider = remote_provider_name
-        .map(str::to_string)
-        .unwrap_or_else(|| "remote".to_string());
+    let provider = "remote".to_string();
     let mut routes = Vec::new();
     for model in remote_available_entries {
         if !is_listable_model_name(model) {
@@ -1085,17 +867,9 @@ pub fn remote_model_routes_lightweight_fallback(
         routes.push(ModelRoute {
             model: model.clone(),
             provider: provider.clone(),
-            api_method: if is_jcode_subscription {
-                crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string()
-            } else {
-                "remote-catalog".to_string()
-            },
-            available: true,
-            detail: if is_jcode_subscription {
-                "jcode subscription routing · managed server-side".to_string()
-            } else {
-                "refreshing route details…".to_string()
-            },
+            api_method: "remote-catalog".to_string(),
+            available: false,
+            detail: "refreshing route details…".to_string(),
             cheapness: None,
         });
     }
@@ -1105,7 +879,7 @@ pub fn remote_model_routes_lightweight_fallback(
             model: current_model.to_string(),
             provider,
             api_method: "current".to_string(),
-            available: true,
+            available: false,
             detail: "refreshing model catalog…".to_string(),
             cheapness: None,
         });
@@ -1474,11 +1248,10 @@ mod tests {
         }
     }
 
-    /// Issue #694 through the real path a user hits: a custom
-    /// `[providers.<name>]` profile in config.toml. The picker must route the
-    /// model to that profile, and must not offer it a Copilot route.
+    /// A custom profile remains discoverable through its authoritative local
+    /// catalog, while a names-only remote aggregate stays provider-neutral.
     #[test]
-    fn custom_config_profile_model_is_routed_and_not_offered_a_copilot_route() {
+    fn custom_config_profile_is_authoritative_but_names_only_remote_catalog_is_neutral() {
         let _guard = EnvGuard::new();
         let jcode_home = std::env::var_os("JCODE_HOME").expect("JCODE_HOME set");
         std::fs::write(
@@ -1498,20 +1271,12 @@ mod tests {
             "a custom profile's model must never be offered a Copilot route"
         );
 
-        // The full fallback builder (what the picker renders) agrees.
+        // A remote aggregate containing only model names cannot prove that
+        // this profile owns the model, even when the current route uses it.
         let routes = remote_model_routes_fallback(Some("omlx"), &[model.to_string()]);
-        assert!(
-            routes
-                .iter()
-                .all(|route| !route.api_method.contains("copilot")),
-            "picker routes must not contain a copilot route: {routes:?}"
-        );
-        assert!(
-            routes
-                .iter()
-                .any(|route| route.api_method == "openai-compatible:omlx"),
-            "picker routes must include the profile route: {routes:?}"
-        );
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].provider, "remote");
+        assert_eq!(routes[0].api_method, "remote-catalog");
     }
 
     /// Issue #694 across both route sources. The picker is fed either by the
@@ -1564,6 +1329,25 @@ mod tests {
     }
 
     #[test]
+    fn names_only_remote_catalog_does_not_infer_provider_for_copilot_gpt_model() {
+        let _guard = EnvGuard::new();
+        let model = "gpt-5.6-sol";
+
+        let routes = remote_model_routes_fallback(Some("Copilot"), &[model.to_string()]);
+
+        assert_eq!(routes.len(), 1, "names-only input must stay neutral");
+        assert_eq!(routes[0].model, model);
+        assert_eq!(routes[0].provider, "remote");
+        assert_eq!(routes[0].api_method, "remote-catalog");
+        assert!(
+            routes
+                .iter()
+                .all(|route| route.provider != "OpenAI" && route.api_method != "openai-oauth"),
+            "bare GPT ids must not be claimed by OpenAI: {routes:?}"
+        );
+    }
+
+    #[test]
     fn remote_compatible_route_uses_live_cache_and_does_not_mark_fallback() {
         let guard = EnvGuard::new();
         guard.save_opencode_cache("https://opencode.ai/zen/v1", &["qwen3.6-plus"]);
@@ -1578,7 +1362,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_model_fallback_prefers_matching_compatible_profile() {
+    fn slash_model_names_only_fallback_is_not_selectable() {
         let guard = EnvGuard::new();
         let model = "vendouple/gpt-5.6-sol";
         guard.save_opencode_cache("https://opencode.ai/zen/v1", &[model]);
@@ -1586,9 +1370,9 @@ mod tests {
         let routes = remote_model_routes_fallback(Some("OpenCode Zen"), &[model.to_string()]);
 
         assert_eq!(routes.len(), 1, "unexpected fallback routes: {routes:?}");
-        assert_eq!(routes[0].provider, "OpenCode Zen");
-        assert_eq!(routes[0].api_method, "openai-compatible:opencode");
-        assert!(routes[0].available);
+        assert_eq!(routes[0].provider, "remote");
+        assert_eq!(routes[0].api_method, "remote-catalog");
+        assert!(!routes[0].available);
     }
 
     #[test]

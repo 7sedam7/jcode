@@ -121,3 +121,119 @@ fn test_remote_model_picker_preview_ctrl_o_sets_default() {
         );
     });
 }
+
+#[test]
+fn test_remote_zero_match_model_preview_enter_sends_explicit_spec() {
+    use tokio::io::AsyncBufReadExt;
+
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        configure_test_remote_models(&mut app);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let line = rt.block_on(async {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let peer = remote
+                .take_dummy_peer()
+                .expect("dummy remote should retain peer stream");
+            let (reader, _writer) = peer.into_split();
+            let mut reader = tokio::io::BufReader::new(reader);
+
+            for c in "/model copilot:gpt-5.6-sol".chars() {
+                app.handle_remote_key(KeyCode::Char(c), KeyModifiers::empty(), &mut remote)
+                    .await
+                    .expect("remote model command keystroke should succeed");
+            }
+
+            let picker = app
+                .inline_interactive_state
+                .as_ref()
+                .expect("model picker preview should be open");
+            assert!(picker.preview);
+            assert!(picker.filtered.is_empty());
+
+            app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)
+                .await
+                .expect("remote Enter should submit the explicit model spec");
+
+            assert!(
+                app.remote_model_switch_in_flight,
+                "remote Enter should send a model-switch request"
+            );
+
+            let mut line = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                reader.read_line(&mut line),
+            )
+                .await
+                .expect("model-switch request should arrive before timeout")
+                .expect("model-switch request should be readable by peer");
+            line
+        });
+
+        match serde_json::from_str::<crate::protocol::Request>(&line)
+            .expect("model-switch request should deserialize")
+        {
+            crate::protocol::Request::SetModel { model, .. } => {
+                assert_eq!(model, "copilot:gpt-5.6-sol");
+            }
+            other => panic!("expected SetModel request, got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn test_remote_names_only_arn_enter_sends_exact_model_id() {
+    use tokio::io::AsyncBufReadExt;
+
+    with_temp_jcode_home(|| {
+        let model =
+            "arn:aws:bedrock:us-east-2:302154194530:inference-profile/us.deepseek.r1-v1:0";
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_available_entries = vec![model.to_string()];
+        app.remote_model_options.clear();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let line = rt.block_on(async {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let peer = remote
+                .take_dummy_peer()
+                .expect("dummy remote should retain peer stream");
+            let (reader, _writer) = peer.into_split();
+            let mut reader = tokio::io::BufReader::new(reader);
+
+            for c in format!("/model {model}").chars() {
+                app.handle_remote_key(KeyCode::Char(c), KeyModifiers::empty(), &mut remote)
+                    .await
+                    .expect("remote model command keystroke should succeed");
+            }
+
+            app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)
+                .await
+                .expect("remote Enter should submit the exact ARN model id");
+
+            let mut line = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                reader.read_line(&mut line),
+            )
+            .await
+            .expect("model-switch request should arrive before timeout")
+            .expect("model-switch request should be readable by peer");
+            line
+        });
+
+        match serde_json::from_str::<crate::protocol::Request>(&line)
+            .expect("model-switch request should deserialize")
+        {
+            crate::protocol::Request::SetModel {
+                model: requested, ..
+            } => {
+                assert_eq!(requested, model);
+            }
+            other => panic!("expected SetModel request, got {other:?}"),
+        }
+    });
+}

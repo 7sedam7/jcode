@@ -804,6 +804,347 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
 }
 
 #[test]
+fn test_remote_compact_catalog_selects_copilot_sol() {
+    use tokio::io::AsyncBufReadExt;
+
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let line = rt.block_on(async {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
+            let mut terminal =
+                ratatui::Terminal::new(backend).expect("failed to create test terminal");
+            let peer = remote
+                .take_dummy_peer()
+                .expect("dummy remote should retain peer stream");
+            let (reader, _writer) = peer.into_split();
+            let mut reader = tokio::io::BufReader::new(reader);
+
+            app.is_remote = true;
+            app.handle_server_event(
+                crate::protocol::ServerEvent::AvailableModelsUpdated {
+                    provider_name: Some("Copilot".to_string()),
+                    provider_model: Some("claude-opus-4.6".to_string()),
+                    available_models: vec!["gpt-5.6-sol".to_string()],
+                    available_model_routes: vec![crate::provider::ModelRoute {
+                        model: "gpt-5.6-sol".to_string(),
+                        provider: "Copilot".to_string(),
+                        api_method: "copilot".to_string(),
+                        available: true,
+                        detail: String::new(),
+                        cheapness: None,
+                    }],
+                },
+                &mut remote,
+            );
+
+            for c in "/model copilot:gpt-5.6-sol".chars() {
+                app.handle_remote_key(KeyCode::Char(c), KeyModifiers::empty(), &mut remote)
+                    .await
+                    .expect("remote model command keystroke should succeed");
+            }
+
+            let picker = app
+                .inline_interactive_state
+                .as_ref()
+                .expect("model picker preview should be open");
+            assert!(
+                !picker.filtered.is_empty(),
+                "canonical Copilot model spec should match the compact catalog route"
+            );
+            let selected_entry = &picker.entries[picker.filtered[picker.selected]];
+            let selected_route = selected_entry
+                .active_option()
+                .expect("filtered model row should have an active route");
+            assert_eq!(selected_entry.model_id(), "gpt-5.6-sol");
+            assert_eq!(selected_route.provider, "Copilot");
+            assert_eq!(selected_route.api_method, "copilot");
+            assert!(
+                selected_route.available,
+                "the matching picker row must be the available Copilot route"
+            );
+
+            super::remote::handle_terminal_event(
+                &mut app,
+                &mut terminal,
+                &mut remote,
+                Some(Ok(crossterm::event::Event::Key(
+                    crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+                ))),
+            )
+            .await
+            .expect("remote Enter should select the Copilot route");
+            assert!(
+                app.pending_route_selection.is_none(),
+                "remote dispatcher should consume the staged route"
+            );
+            assert!(
+                app.pending_model_switch.is_none(),
+                "remote dispatcher should clear the redundant staged model spec"
+            );
+            assert!(
+                app.remote_model_switch_in_flight,
+                "remote dispatcher should mark the route switch in flight"
+            );
+
+            let mut line = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                reader.read_line(&mut line),
+            )
+                .await
+                .expect("model-switch request should arrive before timeout")
+                .expect("model-switch request should be readable by peer");
+            line
+        });
+
+        match serde_json::from_str::<crate::protocol::Request>(&line)
+            .expect("model-switch request should deserialize")
+        {
+            crate::protocol::Request::SetRoute { selection, .. } => {
+                assert_eq!(selection.routed_model_spec(), "copilot:gpt-5.6-sol");
+            }
+            other => panic!("expected SetRoute request, got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn test_remote_canonical_model_command_bypasses_names_only_placeholder() {
+    use tokio::io::AsyncBufReadExt;
+
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let line = rt.block_on(async {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
+            let mut terminal =
+                ratatui::Terminal::new(backend).expect("failed to create test terminal");
+            let peer = remote
+                .take_dummy_peer()
+                .expect("dummy remote should retain peer stream");
+            let (reader, _writer) = peer.into_split();
+            let mut reader = tokio::io::BufReader::new(reader);
+
+            app.is_remote = true;
+            app.remote_provider_name = Some("Copilot".to_string());
+            app.remote_provider_model = Some("claude-opus-4.6".to_string());
+            app.remote_available_entries = vec!["gpt-5.6-sol".to_string()];
+            app.remote_model_options = vec![crate::provider::ModelRoute {
+                model: "gpt-5.6-sol".to_string(),
+                provider: "OpenAI".to_string(),
+                api_method: "openai-oauth".to_string(),
+                available: false,
+                detail: "no credentials".to_string(),
+                cheapness: None,
+            }];
+
+            for c in "/model copilot:gpt-5.6-sol".chars() {
+                app.handle_remote_key(KeyCode::Char(c), KeyModifiers::empty(), &mut remote)
+                    .await
+                    .expect("remote model command keystroke should succeed");
+            }
+
+            let picker = app
+                .inline_interactive_state
+                .as_ref()
+                .expect("model picker preview should be open");
+            assert!(!picker.filtered.is_empty());
+            let selected_entry = &picker.entries[picker.filtered[picker.selected]];
+            let selected_route = selected_entry
+                .active_option()
+                .expect("names-only row should have a placeholder route");
+            assert_eq!(selected_route.api_method, "openai-oauth");
+            assert!(!selected_route.available);
+
+            super::remote::handle_terminal_event(
+                &mut app,
+                &mut terminal,
+                &mut remote,
+                Some(Ok(crossterm::event::Event::Key(
+                    crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+                ))),
+            )
+            .await
+            .expect("remote Enter should submit the canonical command");
+
+            let mut line = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                reader.read_line(&mut line),
+            )
+            .await
+            .expect("model-switch request should arrive before timeout")
+            .expect("model-switch request should be readable by peer");
+            line
+        });
+
+        match serde_json::from_str::<crate::protocol::Request>(&line)
+            .expect("model-switch request should deserialize")
+        {
+            crate::protocol::Request::SetModel { model, .. } => {
+                assert_eq!(model, "copilot:gpt-5.6-sol");
+            }
+            other => panic!("expected canonical SetModel request, got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn test_remote_auth_route_command_bypasses_unavailable_matching_row() {
+    use tokio::io::AsyncBufReadExt;
+
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let line = rt.block_on(async {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
+            let mut terminal =
+                ratatui::Terminal::new(backend).expect("failed to create test terminal");
+            let peer = remote
+                .take_dummy_peer()
+                .expect("dummy remote should retain peer stream");
+            let (reader, _writer) = peer.into_split();
+            let mut reader = tokio::io::BufReader::new(reader);
+
+            app.is_remote = true;
+            app.remote_available_entries = vec!["gpt-5.5".to_string()];
+            app.remote_model_options = vec![crate::provider::ModelRoute {
+                model: "gpt-5.5".to_string(),
+                provider: "OpenAI".to_string(),
+                api_method: "openai-oauth".to_string(),
+                available: false,
+                detail: "no credentials".to_string(),
+                cheapness: None,
+            }];
+
+            for c in "/model openai-oauth:gpt-5.5".chars() {
+                app.handle_remote_key(KeyCode::Char(c), KeyModifiers::empty(), &mut remote)
+                    .await
+                    .expect("remote model command keystroke should succeed");
+            }
+
+            super::remote::handle_terminal_event(
+                &mut app,
+                &mut terminal,
+                &mut remote,
+                Some(Ok(crossterm::event::Event::Key(
+                    crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+                ))),
+            )
+            .await
+            .expect("remote Enter should submit the explicit auth route");
+
+            let mut line = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                reader.read_line(&mut line),
+            )
+            .await
+            .expect("model-switch request should arrive before timeout")
+            .expect("model-switch request should be readable by peer");
+            line
+        });
+
+        match serde_json::from_str::<crate::protocol::Request>(&line)
+            .expect("model-switch request should deserialize")
+        {
+            crate::protocol::Request::SetModel { model, .. } => {
+                assert_eq!(model, "openai-oauth:gpt-5.5");
+            }
+            other => panic!("expected explicit SetModel request, got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn test_remote_server_profile_command_bypasses_wrong_fuzzy_row() {
+    use tokio::io::AsyncBufReadExt;
+
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let line = rt.block_on(async {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
+            let mut terminal =
+                ratatui::Terminal::new(backend).expect("failed to create test terminal");
+            let peer = remote
+                .take_dummy_peer()
+                .expect("dummy remote should retain peer stream");
+            let (reader, _writer) = peer.into_split();
+            let mut reader = tokio::io::BufReader::new(reader);
+
+            app.is_remote = true;
+            app.remote_available_entries = vec!["gpt-5.6-sol-preview".to_string()];
+            app.remote_model_options = vec![crate::provider::ModelRoute {
+                model: "gpt-5.6-sol-preview".to_string(),
+                provider: "Server Profile".to_string(),
+                api_method: "openai-compatible:server-profile".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            }];
+
+            for c in "/model server-profile:gpt-5.6-sol-prevew".chars() {
+                app.handle_remote_key(KeyCode::Char(c), KeyModifiers::empty(), &mut remote)
+                    .await
+                    .expect("remote model command keystroke should succeed");
+            }
+
+            let picker = app
+                .inline_interactive_state
+                .as_mut()
+                .expect("model picker preview should be open");
+            let wrong_entry = picker
+                .entries
+                .iter()
+                .position(|entry| entry.model_id() == "gpt-5.6-sol-preview")
+                .expect("server-profile route should be present");
+            picker.filtered = vec![wrong_entry];
+            picker.selected = 0;
+            assert_eq!(
+                picker.entries[picker.filtered[picker.selected]].model_id(),
+                "gpt-5.6-sol-preview"
+            );
+
+            super::remote::handle_terminal_event(
+                &mut app,
+                &mut terminal,
+                &mut remote,
+                Some(Ok(crossterm::event::Event::Key(
+                    crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+                ))),
+            )
+            .await
+            .expect("remote Enter should submit the explicit server-profile command");
+
+            let mut line = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                reader.read_line(&mut line),
+            )
+            .await
+            .expect("model-switch request should arrive before timeout")
+            .expect("model-switch request should be readable by peer");
+            line
+        });
+
+        match serde_json::from_str::<crate::protocol::Request>(&line)
+            .expect("model-switch request should deserialize")
+        {
+            crate::protocol::Request::SetModel { model, .. } => {
+                assert_eq!(model, "server-profile:gpt-5.6-sol-prevew");
+            }
+            other => panic!("expected explicit SetModel request, got {other:?}"),
+        }
+    });
+}
+
+#[test]
 fn test_duplicate_available_models_updated_event_is_a_no_op() {
     // Temp home: handling the event persists the remote catalog cache, which
     // must not leak into other tests that hydrate from a shared test home.

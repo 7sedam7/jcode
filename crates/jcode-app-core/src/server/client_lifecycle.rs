@@ -1,3 +1,4 @@
+#[cfg(test)]
 use super::available_models_dedup::available_models_dedup_key;
 use super::client_actions::{
     AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
@@ -22,8 +23,11 @@ use super::client_session::{
     handle_clear_session, handle_reload, handle_resume_session, handle_subscribe,
 };
 use super::client_state::{
-    handle_get_compacted_history, handle_get_history, handle_get_model_catalog, handle_get_state,
+    MAX_MODEL_CATALOG_EVENT_BYTES, handle_get_compacted_history, handle_get_history,
+    handle_get_model_catalog, handle_get_state, model_catalog_event_for_delivery,
 };
+#[cfg(test)]
+use super::client_state::{compact_available_models_event, names_only_available_models_event};
 use super::client_writer::write_direct_event;
 use super::comm_await::{CommAwaitMembersContext, handle_comm_await_members};
 use super::comm_control::{
@@ -498,7 +502,6 @@ pub(super) async fn handle_client(
 
     let mut swarm_enabled = crate::config::config().features.swarm;
     let mut last_available_models_snapshot: Option<String> = None;
-    const MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES: usize = 64 * 1024;
 
     // Create a new session for this client
     let t0 = std::time::Instant::now();
@@ -826,49 +829,32 @@ pub(super) async fn handle_client(
                             ));
                             continue;
                         };
-                        // Compare on an age-insensitive key: route details carry
-                        // cosmetic "12m ago" cache ages that tick on their own,
-                        // and a raw byte compare treated that drift as a real
-                        // catalog change, fanning a full repaint out to every
-                        // connected client.
-                        let dedup_key = available_models_dedup_key(&event);
-                        if last_available_models_snapshot.as_ref() == Some(&dedup_key) {
+                        let full_encoded_len = crate::protocol::encode_event(&event).len();
+                        let Some((outbound_event, outbound_key)) =
+                            available_models_event_for_live_update(event)
+                        else {
+                            crate::logging::warn(&format!(
+                                "Skipping oversized bus AvailableModelsUpdated frame for connection {} ({} bytes; compact and names-only representations also exceed the {} byte cap)",
+                                client_connection_id,
+                                full_encoded_len,
+                                MAX_MODEL_CATALOG_EVENT_BYTES
+                            ));
+                            continue;
+                        };
+                        if last_available_models_snapshot.as_ref() == Some(&outbound_key) {
                             continue;
                         }
-                        let encoded_len = crate::protocol::encode_event(&event).len();
-                        if encoded_len > MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES {
-                            // Don't drop the catalog update entirely: clients still
-                            // need fresh model names for the picker. Strip the heavy
-                            // route expansion and ship a names-only snapshot; the TUI
-                            // rebuilds fallback routes for missing models locally.
-                            let slim_event = names_only_available_models_event(&event);
-                            let slim_encoded =
-                                slim_event.as_ref().map(crate::protocol::encode_event);
-                            match (slim_event, slim_encoded) {
-                                (Some(slim_event), Some(slim_encoded))
-                                    if slim_encoded.len()
-                                        <= MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES =>
-                                {
-                                    crate::logging::info(&format!(
-                                        "Downgrading oversized bus AvailableModelsUpdated frame to names-only for connection {} ({} -> {} bytes)",
-                                        client_connection_id,
-                                        encoded_len,
-                                        slim_encoded.len()
-                                    ));
-                                    let _ = client_event_tx.send(slim_event);
-                                }
-                                _ => {
-                                    crate::logging::warn(&format!(
-                                        "Skipping oversized bus AvailableModelsUpdated frame for connection {} ({} bytes)",
-                                        client_connection_id, encoded_len
-                                    ));
-                                }
-                            }
-                            last_available_models_snapshot = Some(dedup_key);
-                            continue;
+                        let outbound_encoded_len =
+                            crate::protocol::encode_event(&outbound_event).len();
+                        if outbound_encoded_len < full_encoded_len {
+                            crate::logging::info(&format!(
+                                "Downgrading oversized bus AvailableModelsUpdated frame for connection {} ({} -> {} bytes)",
+                                client_connection_id, full_encoded_len, outbound_encoded_len
+                            ));
                         }
-                        let _ = client_event_tx.send(event);
-                        last_available_models_snapshot = Some(dedup_key);
+                        if client_event_tx.send(outbound_event).is_ok() {
+                            last_available_models_snapshot = Some(outbound_key);
+                        }
                     }
                     Ok(BusEvent::BatchProgress(progress)) => {
                         if progress.session_id == client_session_id {
@@ -1282,12 +1268,11 @@ pub(super) async fn handle_client(
                             "Rewound session {} to message {} (removed {})",
                             client_session_id, message_index, removed
                         ));
-                        if handle_get_history(
+                        let delivered_catalog_key = match handle_get_history(
                             id,
                             &client_session_id,
                             client_is_processing,
                             &agent,
-                            &provider,
                             &sessions,
                             &client_connections,
                             &client_count,
@@ -1297,10 +1282,14 @@ pub(super) async fn handle_client(
                             None,
                         )
                         .await
-                        .is_err()
                         {
-                            break;
-                        }
+                            Ok(key) => key,
+                            Err(_) => break,
+                        };
+                        apply_delivered_catalog_snapshot(
+                            &mut last_available_models_snapshot,
+                            delivered_catalog_key,
+                        );
                         // The truncated History replaces the client transcript
                         // (dropping the inline plan graph); re-send the plan so
                         // the diagram comes back.
@@ -1342,12 +1331,11 @@ pub(super) async fn handle_client(
                             "Undid rewind for session {} (restored {})",
                             client_session_id, restored
                         ));
-                        if handle_get_history(
+                        let delivered_catalog_key = match handle_get_history(
                             id,
                             &client_session_id,
                             client_is_processing,
                             &agent,
-                            &provider,
                             &sessions,
                             &client_connections,
                             &client_count,
@@ -1357,10 +1345,14 @@ pub(super) async fn handle_client(
                             None,
                         )
                         .await
-                        .is_err()
                         {
-                            break;
-                        }
+                            Ok(key) => key,
+                            Err(_) => break,
+                        };
+                        apply_delivered_catalog_snapshot(
+                            &mut last_available_models_snapshot,
+                            delivered_catalog_key,
+                        );
                         // Same as rewind: restore the inline plan graph after
                         // the transcript replacement.
                         send_swarm_plan_to_session(
@@ -1438,7 +1430,7 @@ pub(super) async fn handle_client(
                 if let Some(target_session_id) = target_session_id {
                     if crate::session::session_exists(&target_session_id) {
                         let pre_resume_session_id = client_session_id.clone();
-                        agent = crate::hooks::with_client_terminal_env(
+                        let resume_result = crate::hooks::with_client_terminal_env(
                             active_terminal_env.clone(),
                             handle_resume_session(
                                 id,
@@ -1451,7 +1443,6 @@ pub(super) async fn handle_client(
                                 &mut client_session_id,
                                 &client_connection_id,
                                 &agent,
-                                &provider,
                                 &registry,
                                 &sessions,
                                 &shutdown_signals,
@@ -1477,6 +1468,11 @@ pub(super) async fn handle_client(
                             ),
                         )
                         .await?;
+                        agent = resume_result.agent;
+                        apply_delivered_catalog_snapshot(
+                            &mut last_available_models_snapshot,
+                            resume_result.delivered_catalog_key,
+                        );
                         session_control = refresh_session_control_handle(
                             &client_session_id,
                             &agent,
@@ -1510,9 +1506,6 @@ pub(super) async fn handle_client(
                                 &swarm_event_tx,
                             )
                             .await;
-                            if let Some(snapshot) = try_available_models_snapshot(&agent) {
-                                last_available_models_snapshot = Some(snapshot);
-                            }
                         } else {
                             crate::logging::warn(&format!(
                                 "Target-aware subscribe failed to bind {} from temporary {}; closing temporary client connection {}",
@@ -1573,20 +1566,16 @@ pub(super) async fn handle_client(
                         &swarm_event_tx,
                     )
                     .await;
-                    if let Some(snapshot) = try_available_models_snapshot(&agent) {
-                        last_available_models_snapshot = Some(snapshot);
-                    }
                 }
                 client_subscribed = true;
             }
 
             Request::GetHistory { id } => {
-                if handle_get_history(
+                let delivered_catalog_key = match handle_get_history(
                     id,
                     &client_session_id,
                     client_is_processing,
                     &agent,
-                    &provider,
                     &sessions,
                     &client_connections,
                     &client_count,
@@ -1596,31 +1585,32 @@ pub(super) async fn handle_client(
                     None,
                 )
                 .await
-                .is_err()
                 {
-                    break;
-                }
+                    Ok(key) => key,
+                    Err(_) => break,
+                };
                 // Follow the History payload with the current swarm plan: a
                 // session-changing History clears the client's plan snapshot
                 // (and the inline plan graph), so re-send it afterwards
                 // instead of leaving the graph blank until the next plan
                 // mutation broadcast.
                 send_swarm_plan_to_session(&client_session_id, &swarm_members, &swarm_plans).await;
-                if let Some(snapshot) = try_available_models_snapshot(&agent) {
-                    last_available_models_snapshot = Some(snapshot);
-                }
+                apply_delivered_catalog_snapshot(
+                    &mut last_available_models_snapshot,
+                    delivered_catalog_key,
+                );
             }
 
             Request::GetModelCatalog { id } => {
-                if handle_get_model_catalog(id, &client_session_id, &agent, &provider, &writer)
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-                if let Some(snapshot) = try_available_models_snapshot(&agent) {
-                    last_available_models_snapshot = Some(snapshot);
-                }
+                let delivered_catalog_key =
+                    match handle_get_model_catalog(id, &client_session_id, &agent, &writer).await {
+                        Ok(key) => key,
+                        Err(_) => break,
+                    };
+                apply_delivered_catalog_snapshot(
+                    &mut last_available_models_snapshot,
+                    delivered_catalog_key,
+                );
             }
 
             Request::GetCompactedHistory {
@@ -1679,7 +1669,7 @@ pub(super) async fn handle_client(
                         info.client_instance_id = client_instance_id.clone();
                     }
                 }
-                agent = crate::hooks::with_client_terminal_env(
+                let resume_result = crate::hooks::with_client_terminal_env(
                     active_terminal_env.clone(),
                     handle_resume_session(
                         id,
@@ -1692,7 +1682,6 @@ pub(super) async fn handle_client(
                         &mut client_session_id,
                         &client_connection_id,
                         &agent,
-                        &provider,
                         &registry,
                         &sessions,
                         &shutdown_signals,
@@ -1718,6 +1707,11 @@ pub(super) async fn handle_client(
                     ),
                 )
                 .await?;
+                agent = resume_result.agent;
+                apply_delivered_catalog_snapshot(
+                    &mut last_available_models_snapshot,
+                    resume_result.delivered_catalog_key,
+                );
                 session_control = refresh_session_control_handle(
                     &client_session_id,
                     &agent,
@@ -1725,9 +1719,6 @@ pub(super) async fn handle_client(
                     &soft_interrupt_queues,
                 )
                 .await;
-                if let Some(snapshot) = try_available_models_snapshot(&agent) {
-                    last_available_models_snapshot = Some(snapshot);
-                }
             }
 
             Request::ResumeAllSessions { id } => {
@@ -3171,30 +3162,20 @@ async fn cancel_processing_message(
     }
 }
 
-fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> Option<String> {
-    let event = try_available_models_updated_event(agent)?;
-    Some(available_models_dedup_key(&event))
+#[cfg(test)]
+fn compact_available_models_snapshot(event: &ServerEvent) -> Option<String> {
+    let compact = compact_available_models_event(event)?;
+    Some(super::available_models_dedup::available_models_dedup_key(
+        &compact,
+    ))
 }
 
-/// Build a names-only copy of an `AvailableModelsUpdated` event by dropping the
-/// per-model route expansion. Used when the fully-routed frame exceeds the live
-/// update size cap so clients still receive fresh model names.
-fn names_only_available_models_event(event: &ServerEvent) -> Option<ServerEvent> {
-    let ServerEvent::AvailableModelsUpdated {
-        provider_name,
-        provider_model,
-        available_models,
-        ..
-    } = event
-    else {
-        return None;
-    };
-    Some(ServerEvent::AvailableModelsUpdated {
-        provider_name: provider_name.clone(),
-        provider_model: provider_model.clone(),
-        available_models: available_models.clone(),
-        available_model_routes: Vec::new(),
-    })
+fn apply_delivered_catalog_snapshot(current: &mut Option<String>, delivered: Option<String>) {
+    *current = delivered;
+}
+
+fn available_models_event_for_live_update(event: ServerEvent) -> Option<(ServerEvent, String)> {
+    model_catalog_event_for_delivery(event)
 }
 
 fn queue_soft_interrupt(

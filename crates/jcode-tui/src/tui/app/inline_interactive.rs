@@ -466,6 +466,41 @@ fn model_picker_provider_hint_from_model_spec(model_spec: &str) -> Option<(&str,
     }
 }
 
+fn model_picker_input_is_explicit_route_spec(model_spec: &str, selected_model: &str) -> bool {
+    if crate::provider::explicit_model_provider_prefix(model_spec).is_some() {
+        return true;
+    }
+    if model_spec == selected_model {
+        return model_spec.contains(':');
+    }
+    model_spec.split_once(':').is_some_and(|(prefix, model)| {
+        !prefix.trim().is_empty() && !model.trim().is_empty() && !selected_model.contains(':')
+    })
+}
+
+fn model_picker_has_server_profile_prefix(
+    model_spec: &str,
+    picker: &InlineInteractiveState,
+) -> bool {
+    let Some((prefix, model)) = model_spec.split_once(':') else {
+        return false;
+    };
+    let prefix = prefix.trim();
+    if prefix.is_empty() || model.trim().is_empty() {
+        return false;
+    }
+    picker
+        .entries
+        .iter()
+        .flat_map(|entry| &entry.options)
+        .any(|route| {
+            route
+                .api_method
+                .strip_prefix("openai-compatible:")
+                .is_some_and(|profile_id| profile_id.eq_ignore_ascii_case(prefix))
+        })
+}
+
 fn model_picker_route_provider_matches_key(
     route_provider_key: Option<&str>,
     route_provider_label: &str,
@@ -582,13 +617,11 @@ impl App {
         snapshot: jcode_provider_core::ModelCatalogSnapshot,
     ) -> CatalogReplaceOutcome {
         let mut provider_meta_changed = false;
-        let mut provider_name_changed = false;
         if let Some(name) = snapshot.provider_name
             && self.remote_provider_name.as_deref() != Some(name.as_str())
         {
             self.remote_provider_name = Some(name);
             provider_meta_changed = true;
-            provider_name_changed = true;
         }
         if let Some(model) = snapshot.provider_model
             && self.remote_provider_model.as_deref() != Some(model.as_str())
@@ -597,13 +630,6 @@ impl App {
             self.remote_provider_model = Some(model);
             provider_meta_changed = true;
         }
-        // A names-only snapshot (models without route expansion) arrives when the
-        // server downgrades an oversized AvailableModelsUpdated frame. Keep the
-        // previously known detailed routes in that case; the picker synthesizes
-        // fallback routes for any newly appearing models. If the provider
-        // identity changed, the old routes are stale and must be dropped.
-        let names_only = snapshot.model_routes.is_empty() && !snapshot.available_models.is_empty();
-        let replace_routes = !names_only || provider_name_changed;
         // Shared-server bus chatter rebroadcasts the catalog frequently (every
         // session's refresh fans out to every connected client). When nothing
         // actually changed, skip the invalidation entirely: invalidating here
@@ -611,7 +637,7 @@ impl App {
         // full-frame redraw on every idle client, which starves the input line.
         let catalog_changed = provider_meta_changed
             || self.remote_available_entries != snapshot.available_models
-            || (replace_routes && self.remote_model_options != snapshot.model_routes);
+            || self.remote_model_options != snapshot.model_routes;
         if !catalog_changed {
             return CatalogReplaceOutcome {
                 provider_meta_changed,
@@ -619,66 +645,11 @@ impl App {
             };
         }
         self.remote_available_entries = snapshot.available_models;
-        if replace_routes {
-            self.remote_model_options = snapshot.model_routes;
-        }
+        self.remote_model_options = snapshot.model_routes;
         self.invalidate_model_picker_cache();
         CatalogReplaceOutcome {
             provider_meta_changed,
             catalog_changed,
-        }
-    }
-
-    /// Ensure every advertised remote model has at least one picker route.
-    ///
-    /// Detailed route expansion can lag behind the model-name catalog (stale
-    /// disk cache, names-only catalog updates). Without this, newly released
-    /// models are invisible in the picker even though the server lists them.
-    ///
-    /// A model also needs re-synthesis when its persisted routes predate an
-    /// auth method: an older session may have baked an OAuth-only fallback
-    /// route into the cache, which would otherwise permanently hide the
-    /// API-key route for that model.
-    fn append_jcode_subscription_routes_static(
-        remote_available_entries: &[String],
-        routes: &mut Vec<crate::provider::ModelRoute>,
-        require_credentials: bool,
-        require_remote_advertisement: bool,
-    ) {
-        if require_credentials && !crate::subscription_catalog::has_credentials() {
-            return;
-        }
-
-        let tier = crate::subscription_catalog::effective_tier();
-        let existing = routes
-            .iter()
-            .filter(|route| {
-                route
-                    .api_method
-                    .eq_ignore_ascii_case(crate::subscription_catalog::JCODE_ROUTE_API_METHOD)
-            })
-            .filter_map(|route| crate::subscription_catalog::canonical_model_id(&route.model))
-            .collect::<HashSet<_>>();
-        for model in crate::subscription_catalog::curated_models()
-            .iter()
-            .filter(|model| {
-                tier.allows(model.min_tier)
-                    && !existing.contains(model.id)
-                    && (!require_remote_advertisement
-                        || remote_available_entries.iter().any(|available| {
-                            crate::subscription_catalog::canonical_model_id(available)
-                                == Some(model.id)
-                        }))
-            })
-        {
-            routes.push(crate::provider::ModelRoute {
-                model: model.id.to_string(),
-                provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
-                api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
-                available: true,
-                detail: crate::subscription_catalog::routing_policy_detail(model),
-                cheapness: None,
-            });
         }
     }
 
@@ -706,45 +677,6 @@ impl App {
         if remote_available_entries.is_empty() {
             return;
         }
-        // Jcode subscription routes are a complete, server-managed catalog.
-        // Do not mix in locally configured Anthropic/OpenAI credentials merely
-        // because a curated model also belongs to one of those upstreams.
-        let provider_is_jcode_subscription = remote_provider_name.is_some_and(|name| {
-            name.eq_ignore_ascii_case(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME)
-        });
-        if provider_is_jcode_subscription {
-            routes.clear();
-            Self::append_jcode_subscription_routes_static(
-                remote_available_entries,
-                routes,
-                false,
-                false,
-            );
-            return;
-        }
-        let poisoned_by_jcode_subscription = !routes.is_empty()
-            && routes.iter().all(|route| {
-                route
-                    .api_method
-                    .eq_ignore_ascii_case(crate::subscription_catalog::JCODE_ROUTE_API_METHOD)
-            });
-        if poisoned_by_jcode_subscription {
-            // Version 1 could turn a mixed provider catalog into all-Jcode rows
-            // after seeing just one managed subscription route. Rebuild ordinary
-            // routes from the names catalog, then append only the current tier's
-            // actual subscription entitlements.
-            *routes = crate::provider::remote_model_routes_fallback(
-                remote_provider_name,
-                remote_available_entries,
-            );
-            Self::append_jcode_subscription_routes_static(
-                remote_available_entries,
-                routes,
-                false,
-                true,
-            );
-            return;
-        }
         let mut methods_by_model: std::collections::HashMap<&str, HashSet<&str>> =
             std::collections::HashMap::new();
         for route in routes.iter() {
@@ -753,28 +685,11 @@ impl App {
                 .or_default()
                 .insert(route.api_method.as_str());
         }
-        let auth = crate::auth::AuthStatus::check_fast();
-        let bedrock_available = auth.bedrock != crate::auth::AuthState::NotConfigured
-            || crate::provider::bedrock::BedrockProvider::has_credentials();
         let missing: Vec<String> = remote_available_entries
             .iter()
             .filter(|model| match methods_by_model.get(model.as_str()) {
                 None => true,
-                Some(methods) => {
-                    // Poisoned caches pin models to placeholder rows forever;
-                    // see inline_interactive_placeholder_routes.rs.
-                    let placeholder_only =
-                        placeholder_routes::methods_are_placeholder_only(methods.iter());
-                    let missing_anthropic_method = crate::provider::provider_for_model(model)
-                        == Some("claude")
-                        && !model.contains('/')
-                        && ((auth.anthropic.has_api_key && !methods.contains("claude-api"))
-                            || (auth.anthropic.has_oauth && !methods.contains("claude-oauth")));
-                    let missing_bedrock_method = bedrock_available
-                        && crate::provider::bedrock::BedrockProvider::is_bedrock_model_id(model)
-                        && !methods.contains("bedrock");
-                    placeholder_only || missing_anthropic_method || missing_bedrock_method
-                }
+                Some(methods) => placeholder_routes::methods_are_placeholder_only(methods.iter()),
             })
             .cloned()
             .collect();
@@ -801,18 +716,6 @@ impl App {
                 }
             }
         }
-        // Detailed provider hydration describes ordinary configured routes. A
-        // signed-in Jcode subscriber still needs the managed route for each
-        // entitled curated model alongside those Anthropic/OpenAI/etc. rows.
-        // The curated client catalog is versioned with the backend and is the
-        // authority for managed subscription entitlements. Do not hide newly
-        // launched subscription models behind a stale remote names snapshot.
-        Self::append_jcode_subscription_routes_static(
-            remote_available_entries,
-            routes,
-            true,
-            false,
-        );
     }
 
     fn hydrate_remote_model_catalog_snapshot(
@@ -838,7 +741,11 @@ impl App {
     }
 
     pub(super) fn persist_remote_model_catalog_cache(&self) {
-        if !self.is_remote || self.remote_model_options.is_empty() {
+        if !self.is_remote {
+            return;
+        }
+        if self.remote_model_options.is_empty() {
+            Self::remove_remote_model_catalog_cache();
             return;
         }
 
@@ -849,6 +756,7 @@ impl App {
             .model_routes
             .retain(|route| !placeholder_routes::is_placeholder_route_method(&route.api_method));
         if snapshot.model_routes.is_empty() {
+            Self::remove_remote_model_catalog_cache();
             return;
         }
         if !remote_model_catalog_snapshot_is_safe(&snapshot) {
@@ -871,6 +779,21 @@ impl App {
                 path.display(),
                 error
             ));
+        }
+    }
+
+    fn remove_remote_model_catalog_cache() {
+        let Some(path) = remote_model_catalog_cache_path() else {
+            return;
+        };
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => crate::logging::warn(&format!(
+                "Failed to remove stale remote model catalog cache {}: {}",
+                path.display(),
+                error
+            )),
         }
     }
 
@@ -1172,14 +1095,10 @@ impl App {
                 );
                 return;
             }
-            // Names-only remote catalog: synthesize properly classified
-            // provider routes (Comtegra/Copilot/Bedrock/Gemini/OpenRouter/…)
-            // rather than a generic "remote-catalog" placeholder. The full
-            // fallback reads per-model disk caches and auth state, which can
-            // take seconds on a large catalog, so for big catalogs open
-            // instantly with lightweight names-only routes and upgrade in the
-            // background. Small catalogs stay synchronous so the first paint
-            // already has effort-expanded, provider-classified rows.
+            // A names-only aggregate cannot identify provider ownership.
+            // Render neutral placeholders until authoritative routes arrive.
+            // Large catalogs still load in the background to keep first paint
+            // responsive, but both paths deliberately preserve neutrality.
             const SYNC_REMOTE_FALLBACK_MAX_MODELS: usize = 64;
             if self.remote_available_entries.len() <= SYNC_REMOTE_FALLBACK_MAX_MODELS {
                 self.build_remote_model_routes_fallback()
@@ -2167,8 +2086,53 @@ impl App {
                 Ok(true)
             }
             KeyCode::Enter => {
+                let explicit_model_spec = self
+                    .input
+                    .trim_start()
+                    .strip_prefix("/model ")
+                    .map(str::trim)
+                    .filter(|spec| !spec.is_empty());
+                let submit_explicit_model_spec = explicit_model_spec.is_some_and(|spec| {
+                    self.inline_interactive_state
+                        .as_ref()
+                        .is_some_and(|picker| {
+                            if picker.kind != PickerKind::Model || picker.filtered.is_empty() {
+                                return false;
+                            }
+                            let entry = &picker.entries[picker.filtered[picker.selected]];
+                            if !model_picker_input_is_explicit_route_spec(spec, entry.model_id())
+                                && !model_picker_has_server_profile_prefix(spec, picker)
+                            {
+                                return false;
+                            }
+                            let Some(route) = entry.active_option() else {
+                                return true;
+                            };
+                            !route.available
+                                || placeholder_routes::is_placeholder_route_method(
+                                    &route.api_method,
+                                )
+                                || picker_route_model_spec(entry, route) != spec
+                        })
+                });
+                if submit_explicit_model_spec {
+                    self.inline_interactive_state = None;
+                    return Ok(false);
+                }
+
                 if let Some(ref mut picker) = self.inline_interactive_state {
                     if picker.filtered.is_empty() {
+                        let model_spec = self
+                            .input
+                            .trim_start()
+                            .strip_prefix("/model ")
+                            .map(str::trim);
+                        if picker.kind == PickerKind::Model
+                            && model_spec.is_some_and(|spec| !spec.is_empty())
+                        {
+                            self.inline_interactive_state = None;
+                            return Ok(false);
+                        }
                         self.inline_interactive_state = None;
                         self.input.clear();
                         self.cursor_pos = 0;
@@ -3699,11 +3663,12 @@ mod tests {
         REMOTE_MODEL_CATALOG_CACHE_MAX_AGE_SECS, REMOTE_MODEL_CATALOG_CACHE_VERSION,
         REMOTE_MODEL_CATALOG_MAX_DETAIL_BYTES, RemoteModelCatalogCache,
         filter_routes_by_provider_allowlist, key_char_eq_ignore_ascii_case,
-        model_picker_effort_matches_default, model_picker_route_is_current,
-        model_picker_route_is_default, model_picker_route_is_recommended,
-        next_model_favorite_after_current, picker_is_runtime_model_picker,
-        remote_model_catalog_cache_is_fresh, remote_model_catalog_cache_origin,
-        remote_model_catalog_snapshot_is_safe, route_supports_reasoning_effort,
+        model_picker_effort_matches_default, model_picker_input_is_explicit_route_spec,
+        model_picker_route_is_current, model_picker_route_is_default,
+        model_picker_route_is_recommended, next_model_favorite_after_current,
+        picker_is_runtime_model_picker, remote_model_catalog_cache_is_fresh,
+        remote_model_catalog_cache_origin, remote_model_catalog_snapshot_is_safe,
+        route_supports_reasoning_effort,
     };
     use crate::tui::{
         AgentModelTarget, App, InlineInteractiveState, PickerAction, PickerEntry, PickerKind,
@@ -4071,6 +4036,30 @@ mod tests {
             &openai_route,
             Some("copilot:gpt-5.5"),
             None,
+        ));
+    }
+
+    #[test]
+    fn explicit_model_preview_recognizes_auth_and_server_profile_prefixes() {
+        assert!(model_picker_input_is_explicit_route_spec(
+            "openai-oauth:gpt-5.5",
+            "gpt-5.5",
+        ));
+        assert!(model_picker_input_is_explicit_route_spec(
+            "claude-api:claude-opus-5",
+            "claude-opus-5",
+        ));
+        assert!(model_picker_input_is_explicit_route_spec(
+            "server-profile:gpt-5.6-sol",
+            "gpt-5.6-sol",
+        ));
+        assert!(model_picker_input_is_explicit_route_spec(
+            "server-profile:gpt-5.6-sol-prevew",
+            "gpt-5.6-sol-preview",
+        ));
+        assert!(model_picker_input_is_explicit_route_spec(
+            "arn:aws:bedrock:us-east-1:model/example",
+            "arn:aws:bedrock:us-east-1:model/example",
         ));
     }
 

@@ -1,4 +1,5 @@
 use super::ClientConnectionInfo;
+use super::available_models_dedup::available_models_dedup_key;
 use super::server_has_newer_binary;
 use crate::agent::Agent;
 use crate::bus::Bus;
@@ -6,7 +7,6 @@ use crate::message::{ContentBlock, Role};
 use crate::protocol::{
     HistoryMessage, ServerEvent, SessionActivitySnapshot, TokenUsageTotals, encode_event,
 };
-use crate::provider::Provider;
 use crate::session::{Session, SessionStatus};
 use crate::transport::WriteHalf;
 use anyhow::Result;
@@ -24,6 +24,107 @@ use tokio::sync::{Mutex, RwLock};
 
 const ATTACH_MODEL_PREFETCH_DEBOUNCE_SECS: u64 = 15;
 const RELOAD_RESTORE_MARKER_MAX_AGE: Duration = Duration::from_secs(60);
+pub(super) const MAX_MODEL_CATALOG_EVENT_BYTES: usize = 64 * 1024;
+
+pub(super) fn compact_model_routes(
+    routes: Vec<crate::provider::ModelRoute>,
+) -> Vec<crate::provider::ModelRoute> {
+    routes
+        .into_iter()
+        .map(|mut route| {
+            route.detail.clear();
+            route.cheapness = None;
+            route
+        })
+        .collect()
+}
+
+pub(super) fn compact_available_models_event(event: &ServerEvent) -> Option<ServerEvent> {
+    let ServerEvent::AvailableModelsUpdated {
+        provider_name,
+        provider_model,
+        available_models,
+        available_model_routes,
+    } = event
+    else {
+        return None;
+    };
+
+    Some(ServerEvent::AvailableModelsUpdated {
+        provider_name: provider_name.clone(),
+        provider_model: provider_model.clone(),
+        available_models: available_models.clone(),
+        available_model_routes: compact_model_routes(available_model_routes.clone()),
+    })
+}
+
+pub(super) fn names_only_available_models_event(event: &ServerEvent) -> Option<ServerEvent> {
+    let ServerEvent::AvailableModelsUpdated {
+        provider_name,
+        provider_model,
+        available_models,
+        ..
+    } = event
+    else {
+        return None;
+    };
+
+    Some(ServerEvent::AvailableModelsUpdated {
+        provider_name: provider_name.clone(),
+        provider_model: provider_model.clone(),
+        available_models: available_models.clone(),
+        available_model_routes: Vec::new(),
+    })
+}
+
+pub(super) fn model_catalog_event_for_delivery(
+    event: ServerEvent,
+) -> Option<(ServerEvent, String)> {
+    let outbound = if encode_event(&event).len() <= MAX_MODEL_CATALOG_EVENT_BYTES {
+        event
+    } else if let Some(compact) = compact_available_models_event(&event)
+        && encode_event(&compact).len() <= MAX_MODEL_CATALOG_EVENT_BYTES
+    {
+        compact
+    } else {
+        let names_only = names_only_available_models_event(&event)?;
+        if encode_event(&names_only).len() > MAX_MODEL_CATALOG_EVENT_BYTES {
+            return None;
+        }
+        names_only
+    };
+    let key = available_models_dedup_key(&outbound);
+    Some((outbound, key))
+}
+
+fn model_catalog_fields_for_delivery(
+    provider_name: Option<String>,
+    provider_model: Option<String>,
+    available_models: Vec<String>,
+    available_model_routes: Vec<crate::provider::ModelRoute>,
+) -> (Vec<String>, Vec<crate::provider::ModelRoute>) {
+    let event = ServerEvent::AvailableModelsUpdated {
+        provider_name,
+        provider_model,
+        available_models,
+        available_model_routes,
+    };
+    let Some((event, _)) = model_catalog_event_for_delivery(event) else {
+        crate::logging::warn(
+            "Model catalog exceeds the delivery limit without routes; omitting it from the response",
+        );
+        return (Vec::new(), Vec::new());
+    };
+    let ServerEvent::AvailableModelsUpdated {
+        available_models,
+        available_model_routes,
+        ..
+    } = event
+    else {
+        unreachable!("model catalog projection must return AvailableModelsUpdated");
+    };
+    (available_models, available_model_routes)
+}
 
 fn optional_token_usage_totals(totals: TokenUsageTotals) -> Option<TokenUsageTotals> {
     (totals.messages_with_token_usage > 0).then_some(totals)
@@ -100,14 +201,13 @@ pub(super) async fn handle_get_state(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "history fetch needs session state, client activity, provider handle, and server identity metadata"
+    reason = "history fetch needs session state, client activity, and server identity metadata"
 )]
 pub(super) async fn handle_get_history(
     id: u64,
     client_session_id: &str,
     client_is_processing: bool,
     agent: &Arc<Mutex<Agent>>,
-    provider: &Arc<dyn Provider>,
     sessions: &SessionAgents,
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     client_count: &Arc<RwLock<usize>>,
@@ -115,7 +215,7 @@ pub(super) async fn handle_get_history(
     server_name: &str,
     server_icon: &str,
     was_interrupted: Option<bool>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let history_start = Instant::now();
     let activity =
         session_activity_snapshot(client_connections, client_session_id, client_is_processing)
@@ -126,10 +226,9 @@ pub(super) async fn handle_get_history(
             "handle_get_history: session {} busy, falling back to persisted remote-startup snapshot",
             client_session_id
         ));
-        send_history_from_persisted_session(
+        let delivered_catalog_key = send_history_from_persisted_session(
             id,
             client_session_id,
-            provider,
             sessions,
             client_count,
             writer,
@@ -144,10 +243,11 @@ pub(super) async fn handle_get_history(
             client_session_id,
             history_start.elapsed().as_millis(),
         ));
-        return Ok(());
+        spawn_model_prefetch_update(Arc::clone(agent), true);
+        return Ok(delivered_catalog_key);
     }
 
-    send_history(
+    let delivered_catalog_key = send_history(
         id,
         client_session_id,
         agent,
@@ -165,7 +265,7 @@ pub(super) async fn handle_get_history(
     let send_history_ms = history_start.elapsed().as_millis();
 
     let prefetch_start = Instant::now();
-    spawn_model_prefetch_update(Arc::clone(provider), Arc::clone(agent));
+    spawn_model_prefetch_update(Arc::clone(agent), false);
     crate::logging::info(&format!(
         "[TIMING] handle_get_history: session={}, send_history={}ms, prefetch_spawn={}ms, total={}ms",
         client_session_id,
@@ -173,16 +273,15 @@ pub(super) async fn handle_get_history(
         prefetch_start.elapsed().as_millis(),
         history_start.elapsed().as_millis(),
     ));
-    Ok(())
+    Ok(delivered_catalog_key)
 }
 
 pub(super) async fn handle_get_model_catalog(
     id: u64,
     session_id: &str,
     agent: &Arc<Mutex<Agent>>,
-    provider: &Arc<dyn Provider>,
     writer: &Arc<Mutex<WriteHalf>>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let started = Instant::now();
     let build_started = Instant::now();
     let (
@@ -192,6 +291,7 @@ pub(super) async fn handle_get_model_catalog(
         available_model_routes,
         resolved_credential,
         source,
+        publish_current_catalog,
     ) = {
         match agent.try_lock() {
             Ok(agent_guard) => (
@@ -201,10 +301,11 @@ pub(super) async fn handle_get_model_catalog(
                 agent_guard.model_routes(),
                 agent_guard.active_resolved_credential(),
                 "live",
+                false,
             ),
             Err(_) => {
                 crate::logging::warn(&format!(
-                    "handle_get_model_catalog: session {} busy, using provider/persisted fallback",
+                    "handle_get_model_catalog: session {} busy, using persisted metadata until the agent catalog is available",
                     session_id
                 ));
                 let persisted = Session::load_for_remote_startup(session_id)
@@ -212,17 +313,26 @@ pub(super) async fn handle_get_model_catalog(
                     .ok();
                 let persisted_model = persisted.as_ref().and_then(|session| session.model.clone());
                 (
-                    Some(provider.name().to_string()),
-                    persisted_model.or_else(|| Some(provider.model())),
-                    provider.available_models_display(),
-                    provider.model_routes(),
-                    provider.active_resolved_credential(),
+                    persisted
+                        .as_ref()
+                        .and_then(history_provider_name_from_session),
+                    persisted_model,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
                     "fallback",
+                    true,
                 )
             }
         }
     };
     let build_ms = build_started.elapsed().as_millis();
+    let (available_models, available_model_routes) = model_catalog_fields_for_delivery(
+        provider_name.clone(),
+        provider_model.clone(),
+        available_models,
+        available_model_routes,
+    );
 
     let encode_started = Instant::now();
     let event = ServerEvent::History {
@@ -260,12 +370,14 @@ pub(super) async fn handle_get_model_catalog(
         activity: None,
         side_panel: Default::default(),
     };
+    let delivered_catalog_key = history_catalog_snapshot_key(&event);
     let json = encode_event(&event);
     let encode_ms = encode_started.elapsed().as_millis();
     let write_started = Instant::now();
     let mut writer_guard = writer.lock().await;
     let writer_lock_ms = write_started.elapsed().as_millis();
     writer_guard.write_all(json.as_bytes()).await?;
+    spawn_model_prefetch_update(Arc::clone(agent), publish_current_catalog);
     let write_ms = write_started
         .elapsed()
         .as_millis()
@@ -281,7 +393,7 @@ pub(super) async fn handle_get_model_catalog(
         write_ms,
         started.elapsed().as_millis()
     ));
-    Ok(())
+    Ok(delivered_catalog_key)
 }
 
 pub(super) async fn handle_get_compacted_history(
@@ -470,7 +582,6 @@ fn infer_persisted_session_interrupted_by_reload(session_id: &str) -> bool {
 async fn send_history_from_persisted_session(
     id: u64,
     session_id: &str,
-    provider: &Arc<dyn Provider>,
     sessions: &SessionAgents,
     client_count: &Arc<RwLock<usize>>,
     writer: &Arc<Mutex<WriteHalf>>,
@@ -478,7 +589,7 @@ async fn send_history_from_persisted_session(
     server_icon: &str,
     was_interrupted: Option<bool>,
     activity: Option<SessionActivitySnapshot>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let session = crate::session::Session::load_for_remote_startup(session_id)
         .or_else(|_| crate::session::Session::load_startup_stub(session_id))?;
     let token_usage_totals = session.token_usage_totals();
@@ -487,17 +598,15 @@ async fn send_history_from_persisted_session(
     // (including its message transcript) before building and serializing the
     // large History event, so we do not hold Session + rendered payload +
     // serialized wire bytes simultaneously.
-    let provider_name =
-        history_provider_name_from_session(&session).or_else(|| Some(provider.name().to_string()));
-    let provider_model = session.model.clone().or_else(|| Some(provider.model()));
+    let provider_name = history_provider_name_from_session(&session);
+    let provider_model = session.model.clone();
     let subagent_model = session.subagent_model.clone();
     let autoreview_enabled = session.autoreview_enabled;
     let autojudge_enabled = session.autojudge_enabled;
     let is_canary = session.is_canary;
-    let reasoning_effort = session
-        .reasoning_effort
-        .clone()
-        .or_else(|| provider.reasoning_effort());
+    let reasoning_effort = session.reasoning_effort.clone();
+    let available_models = Vec::new();
+    let available_model_routes = Vec::new();
     drop(session);
 
     let messages = rendered_messages
@@ -524,8 +633,8 @@ async fn send_history_from_persisted_session(
         subagent_model,
         autoreview_enabled,
         autojudge_enabled,
-        available_models: Vec::new(),
-        available_model_routes: Vec::new(),
+        available_models,
+        available_model_routes,
         mcp_servers: Vec::new(),
         skills: Vec::new(),
         total_tokens: optional_total_tokens(token_usage_totals),
@@ -542,7 +651,7 @@ async fn send_history_from_persisted_session(
         connection_type: None,
         status_detail: None,
         upstream_provider: None,
-        resolved_credential: provider.active_resolved_credential(),
+        resolved_credential: None,
         reasoning_effort,
         service_tier: None,
         compaction_mode: crate::config::config().compaction.mode.clone(),
@@ -550,7 +659,9 @@ async fn send_history_from_persisted_session(
         side_panel,
     };
 
-    write_event(writer, &history_event).await
+    let delivered_catalog_key = history_catalog_snapshot_key(&history_event);
+    write_event(writer, &history_event).await?;
+    Ok(delivered_catalog_key)
 }
 
 #[expect(
@@ -570,7 +681,7 @@ pub(super) async fn send_history(
     activity: Option<SessionActivitySnapshot>,
     payload_mode: HistoryPayloadMode,
     include_model_catalog: bool,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let history_start = Instant::now();
     let agent_lock_start = Instant::now();
     let (
@@ -628,12 +739,13 @@ pub(super) async fn send_history(
             (Vec::new(), 0)
         };
 
-        // Model-route expansion can be relatively expensive (provider/account routing,
-        // endpoint cache reads, etc.). The TUI already supports later
-        // AvailableModelsUpdated events, so keep the initial History payload fast and
-        // let the background refresh populate detailed routes asynchronously.
-        let available_model_routes = Vec::new();
-        let model_routes_ms = 0;
+        let (available_model_routes, model_routes_ms) = if include_model_catalog {
+            let model_routes_start = Instant::now();
+            let routes = agent_guard.model_routes();
+            (routes, model_routes_start.elapsed().as_millis())
+        } else {
+            (Vec::new(), 0)
+        };
 
         let skills_start = Instant::now();
         let skills = agent_guard.available_skill_names();
@@ -680,6 +792,12 @@ pub(super) async fn send_history(
             compaction_mode_ms,
         )
     };
+    let (available_models, available_model_routes) = model_catalog_fields_for_delivery(
+        Some(provider_name.clone()),
+        Some(provider_model.clone()),
+        available_models,
+        available_model_routes,
+    );
 
     let side_panel_start = Instant::now();
     let side_panel = crate::side_panel::snapshot_for_session(session_id).unwrap_or_default();
@@ -762,6 +880,7 @@ pub(super) async fn send_history(
         activity,
         side_panel,
     };
+    let delivered_catalog_key = history_catalog_snapshot_key(&history_event);
     let encode_start = Instant::now();
     let json = encode_event(&history_event);
     // Free the structured event as soon as the wire bytes exist so only ~1x
@@ -790,7 +909,32 @@ pub(super) async fn send_history(
         history_start.elapsed().as_millis(),
     ));
 
-    result.map_err(Into::into)
+    result?;
+    Ok(delivered_catalog_key)
+}
+
+fn history_catalog_snapshot_key(event: &ServerEvent) -> Option<String> {
+    let ServerEvent::History {
+        provider_name,
+        provider_model,
+        available_models,
+        available_model_routes,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if available_models.is_empty() && available_model_routes.is_empty() {
+        return None;
+    }
+    Some(available_models_dedup_key(
+        &ServerEvent::AvailableModelsUpdated {
+            provider_name: provider_name.clone(),
+            provider_model: provider_model.clone(),
+            available_models: available_models.clone(),
+            available_model_routes: available_model_routes.clone(),
+        },
+    ))
 }
 
 pub(super) async fn session_activity_snapshot(
@@ -880,17 +1024,22 @@ mod tests {
     }
 }
 
-pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Arc<Mutex<Agent>>) {
+pub(super) fn spawn_model_prefetch_update(agent: Arc<Mutex<Agent>>, publish_current_catalog: bool) {
     tokio::spawn(async move {
-        let (provider_name, initial_models) = {
+        let (provider, provider_name, initial_models, initial_routes) = {
             let agent_guard = agent.lock().await;
             (
+                agent_guard.provider_handle(),
                 agent_guard.provider_name(),
                 agent_guard.available_models_display(),
+                agent_guard.model_routes(),
             )
         };
 
-        if !initial_models.is_empty() {
+        if !initial_routes.is_empty() {
+            if publish_current_catalog {
+                Bus::global().publish_models_updated();
+            }
             return;
         }
 
@@ -914,7 +1063,7 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
             )
         };
 
-        if refreshed.0 == initial_models && refreshed.1.is_empty() {
+        if refreshed.0 == initial_models && refreshed.1 == initial_routes {
             return;
         }
 

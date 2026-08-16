@@ -143,7 +143,7 @@ fn test_model_command_provider_suggestions_include_auto_for_normalized_bare_open
 }
 
 #[test]
-fn test_remote_fallback_provider_suggestions_normalize_bare_openai_openrouter_routes() {
+fn test_remote_names_only_provider_suggestions_ignore_local_openrouter_credentials() {
     with_temp_jcode_home(|| {
         let prev_api_key = std::env::var_os("OPENROUTER_API_KEY");
         crate::env::set_var("OPENROUTER_API_KEY", "test-openrouter-key");
@@ -159,7 +159,7 @@ fn test_remote_fallback_provider_suggestions_normalize_bare_openai_openrouter_ro
         let commands: Vec<&str> = suggestions.iter().map(|(cmd, _)| cmd.as_str()).collect();
 
         assert!(commands.contains(&"/model openai/gpt-5.4@auto"));
-        assert!(commands.contains(&"/model openai/gpt-5.4@OpenAI"));
+        assert!(!commands.contains(&"/model openai/gpt-5.4@OpenAI"));
 
         if let Some(prev_api_key) = prev_api_key {
             crate::env::set_var("OPENROUTER_API_KEY", prev_api_key);
@@ -251,4 +251,31 @@ fn test_model_picker_preview_enter_selects_model() {
     assert!(app.inline_interactive_state.is_none());
     assert!(app.input().is_empty());
     assert_eq!(app.cursor_pos(), 0);
+}
+
+#[test]
+fn test_zero_match_model_preview_submits_explicit_spec() {
+    let (mut app, set_model_calls) = create_openrouter_spec_capture_test_app();
+    configure_test_remote_models(&mut app);
+
+    for c in "/model copilot:gpt-5.6-sol".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .unwrap();
+    }
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("model picker preview should be open");
+    assert!(picker.preview);
+    assert!(picker.filtered.is_empty());
+
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+
+    assert!(app.inline_interactive_state.is_none());
+    assert_eq!(
+        set_model_calls.lock().unwrap().as_slice(),
+        ["copilot:gpt-5.6-sol"]
+    );
 }

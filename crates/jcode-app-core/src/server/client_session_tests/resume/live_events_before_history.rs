@@ -97,7 +97,6 @@ async fn handle_resume_session_registers_live_events_before_history_replay() -> 
 
     let resume_task = tokio::spawn({
         let agent = Arc::clone(&agent);
-        let provider = Arc::clone(&provider);
         let registry = registry.clone();
         let sessions = Arc::clone(&sessions);
         let shutdown_signals = Arc::clone(&shutdown_signals);
@@ -130,7 +129,6 @@ async fn handle_resume_session_registers_live_events_before_history_replay() -> 
                 &mut client_session_id,
                 "conn_restore",
                 &agent,
-                &provider,
                 &registry,
                 &sessions,
                 &shutdown_signals,

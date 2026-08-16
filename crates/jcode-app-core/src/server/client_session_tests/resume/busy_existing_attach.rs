@@ -1,3 +1,59 @@
+#[derive(Clone)]
+struct BusyAttachCatalogProvider {
+    name: &'static str,
+    model: &'static str,
+    prefetched: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl Provider for BusyAttachCatalogProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Err(anyhow::anyhow!("not used"))
+    }
+
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn model(&self) -> String {
+        self.model.to_string()
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        vec![self.model.to_string()]
+    }
+
+    fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
+        if !self.prefetched.load(std::sync::atomic::Ordering::SeqCst) {
+            return Vec::new();
+        }
+        vec![crate::provider::ModelRoute {
+            model: self.model.to_string(),
+            provider: self.name.to_string(),
+            api_method: self.name.to_ascii_lowercase(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        }]
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+
+    async fn prefetch_models(&self) -> Result<()> {
+        self.prefetched
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() -> Result<()> {
     let _guard = crate::storage::lock_test_env();
@@ -19,18 +75,29 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         token_usage: None,
     };
 
-    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
-    let existing_registry = Registry::new(provider.clone()).await;
+    let target_prefetched = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let source_prefetched = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let target_provider: Arc<dyn Provider> = Arc::new(BusyAttachCatalogProvider {
+        name: "TargetProvider",
+        model: "target-model",
+        prefetched: Arc::clone(&target_prefetched),
+    });
+    let source_provider: Arc<dyn Provider> = Arc::new(BusyAttachCatalogProvider {
+        name: "SourceProvider",
+        model: "source-model",
+        prefetched: Arc::clone(&source_prefetched),
+    });
+    let existing_registry = Registry::new(target_provider.clone()).await;
     let existing_agent = Arc::new(Mutex::new(build_test_agent_with_id(
-        provider.clone(),
+        target_provider.clone(),
         existing_registry,
         target_session_id,
         vec![persisted_message],
     )));
 
-    let new_registry = Registry::new(provider.clone()).await;
+    let new_registry = Registry::new(source_provider.clone()).await;
     let new_agent = Arc::new(Mutex::new(build_test_agent_with_id(
-        provider.clone(),
+        source_provider.clone(),
         new_registry.clone(),
         temp_session_id,
         Vec::new(),
@@ -98,9 +165,9 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
 
     let mut client_selfdev = false;
     let mut client_session_id = temp_session_id.to_string();
-    let _busy_guard = existing_agent.lock().await;
+    let busy_guard = existing_agent.lock().await;
 
-    handle_resume_session(
+    let resume_result = handle_resume_session(
         77,
         target_session_id.to_string(),
         None,
@@ -111,7 +178,6 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         &mut client_session_id,
         "conn_new",
         &new_agent,
-        &provider,
         &new_registry,
         &sessions,
         &shutdown_signals,
@@ -171,6 +237,7 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
     )
     .await
     .expect("subscribe bookkeeping must not wait for a busy live agent");
+    drop(busy_guard);
 
     // Resume and subscribe both answer request id 77, so each emits its own
     // Done. Collect both batches, otherwise the assertions below only ever see
@@ -210,6 +277,41 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
     .await
     .expect("history should be written promptly")?;
     let event: ServerEvent = serde_json::from_str(line.trim())?;
+    let delivered_catalog_key = match &event {
+        ServerEvent::History {
+            provider_name,
+            provider_model,
+            available_models,
+            available_model_routes,
+            ..
+        } if !available_models.is_empty() || !available_model_routes.is_empty() => {
+            Some(
+                crate::server::available_models_dedup::available_models_dedup_key(
+                    &ServerEvent::AvailableModelsUpdated {
+                        provider_name: provider_name.clone(),
+                        provider_model: provider_model.clone(),
+                        available_models: available_models.clone(),
+                        available_model_routes: available_model_routes.clone(),
+                    },
+                ),
+            )
+        }
+        _ => None,
+    };
+    assert_eq!(
+        resume_result.delivered_catalog_key, delivered_catalog_key,
+        "resume must report the key for the exact History catalog it emitted"
+    );
+    let ServerEvent::History {
+        available_models,
+        available_model_routes,
+        ..
+    } = &event
+    else {
+        panic!("expected history event");
+    };
+    assert!(available_models.is_empty());
+    assert!(available_model_routes.is_empty());
     match event {
         ServerEvent::History {
             session_id,
@@ -222,6 +324,22 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         }
         other => panic!("expected history event, got {other:?}"),
     }
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !target_prefetched.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("target agent provider should be prefetched after it becomes available");
+    assert!(
+        !source_prefetched.load(std::sync::atomic::Ordering::SeqCst),
+        "busy resume must not prefetch through the temporary source provider"
+    );
+    let target_routes = existing_agent.lock().await.model_routes();
+    assert_eq!(target_routes.len(), 1);
+    assert_eq!(target_routes[0].model, "target-model");
+    assert_eq!(target_routes[0].provider, "TargetProvider");
 
     restore_runtime_dir(prev_runtime);
     Ok(())

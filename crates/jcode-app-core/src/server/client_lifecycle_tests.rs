@@ -6,6 +6,127 @@ use futures::stream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+fn copilot_available_models_event() -> ServerEvent {
+    ServerEvent::AvailableModelsUpdated {
+        provider_name: Some("Copilot".to_string()),
+        provider_model: Some("gpt-5.6-sol".to_string()),
+        available_models: vec!["gpt-5.6-sol".to_string()],
+        available_model_routes: vec![crate::provider::ModelRoute {
+            model: "gpt-5.6-sol".to_string(),
+            provider: "Copilot".to_string(),
+            api_method: "copilot".to_string(),
+            available: true,
+            detail: "large optional catalog detail".repeat(128),
+            cheapness: Some(crate::provider::RouteCheapnessEstimate::subscription(
+                crate::provider::RouteCostSource::Heuristic,
+                crate::provider::RouteCostConfidence::Low,
+                10_000_000,
+                Some(300),
+                Some("optional route cost metadata".to_string()),
+            )),
+        }],
+    }
+}
+
+#[test]
+fn compact_available_models_event_preserves_route_identity_and_removes_optional_metadata() {
+    let compact =
+        compact_available_models_event(&copilot_available_models_event()).expect("compact event");
+    let ServerEvent::AvailableModelsUpdated {
+        provider_name,
+        provider_model,
+        available_models,
+        available_model_routes,
+    } = compact
+    else {
+        panic!("expected model update");
+    };
+
+    assert_eq!(provider_name.as_deref(), Some("Copilot"));
+    assert_eq!(provider_model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(available_models, ["gpt-5.6-sol"]);
+    assert_eq!(available_model_routes.len(), 1);
+    let route = &available_model_routes[0];
+    assert_eq!(route.model, "gpt-5.6-sol");
+    assert_eq!(route.provider, "Copilot");
+    assert_eq!(route.api_method, "copilot");
+    assert!(route.available);
+    assert!(route.detail.is_empty());
+    assert!(route.cheapness.is_none());
+}
+
+#[test]
+fn names_only_available_models_event_removes_routes_entirely() {
+    let names_only =
+        names_only_available_models_event(&copilot_available_models_event()).expect("names event");
+    let ServerEvent::AvailableModelsUpdated {
+        provider_name,
+        provider_model,
+        available_models,
+        available_model_routes,
+    } = names_only
+    else {
+        panic!("expected model update");
+    };
+
+    assert_eq!(provider_name.as_deref(), Some("Copilot"));
+    assert_eq!(provider_model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(available_models, ["gpt-5.6-sol"]);
+    assert!(available_model_routes.is_empty());
+}
+
+#[test]
+fn history_catalog_dedup_key_tracks_delivered_compact_routes() {
+    let event = copilot_available_models_event();
+    let full_key = available_models_dedup_key(&event);
+    let compact_key =
+        compact_available_models_snapshot(&event).expect("compact catalog snapshot key");
+    let compact_event = compact_available_models_event(&event).expect("compact event");
+
+    assert_eq!(compact_key, available_models_dedup_key(&compact_event));
+    assert_ne!(
+        compact_key, full_key,
+        "compact History must not claim full route metadata was delivered"
+    );
+}
+
+#[test]
+fn catalog_delivery_without_routes_clears_previous_snapshot() {
+    let mut snapshot = Some("source-catalog".to_string());
+
+    apply_delivered_catalog_snapshot(&mut snapshot, None);
+
+    assert_eq!(snapshot, None);
+}
+
+#[test]
+fn oversized_live_catalog_tracks_the_compact_snapshot_that_is_sent() {
+    let mut event = copilot_available_models_event();
+    let ServerEvent::AvailableModelsUpdated {
+        available_model_routes,
+        ..
+    } = &mut event
+    else {
+        panic!("expected model update");
+    };
+    available_model_routes[0].detail = "oversized optional detail".repeat(4096);
+    let full_key = available_models_dedup_key(&event);
+    let (outbound, outbound_key) =
+        available_models_event_for_live_update(event).expect("live catalog representation");
+
+    assert_eq!(outbound_key, available_models_dedup_key(&outbound));
+    assert_ne!(outbound_key, full_key);
+    let ServerEvent::AvailableModelsUpdated {
+        available_model_routes,
+        ..
+    } = outbound
+    else {
+        panic!("expected model update");
+    };
+    assert_eq!(available_model_routes.len(), 1);
+    assert!(available_model_routes[0].detail.is_empty());
+}
+
 struct IsolatedRuntimeDir {
     _prev_runtime: Option<std::ffi::OsString>,
     _temp: tempfile::TempDir,
@@ -16,6 +137,94 @@ struct IsolatedReloadRecoveryEnv {
     prev_runtime: Option<std::ffi::OsString>,
     _home: tempfile::TempDir,
     _runtime: tempfile::TempDir,
+}
+
+#[derive(Clone)]
+struct OversizedCatalogProvider;
+
+#[async_trait]
+impl Provider for OversizedCatalogProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Err(anyhow::anyhow!("not used"))
+    }
+
+    fn name(&self) -> &str {
+        "Copilot"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+
+    fn model(&self) -> String {
+        "gpt-5.6-sol".to_string()
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        vec!["gpt-5.6-sol".to_string()]
+    }
+
+    fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
+        vec![crate::provider::ModelRoute {
+            model: "gpt-5.6-sol".to_string(),
+            provider: "Copilot".to_string(),
+            api_method: "copilot".to_string(),
+            available: true,
+            detail: "oversized optional detail".repeat(8192),
+            cheapness: None,
+        }]
+    }
+}
+
+#[tokio::test]
+async fn catalog_response_and_unchanged_oversized_bus_update_share_snapshot() {
+    let provider: Arc<dyn Provider> = Arc::new(OversizedCatalogProvider);
+    let session = crate::session::Session::create_with_id(
+        "session_oversized_catalog_projection".to_string(),
+        None,
+        None,
+    );
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider,
+        Registry::empty(),
+        session,
+        None,
+    )));
+    let (stream_a, stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let (_reader_a, writer_a) = stream_a.into_split();
+    let writer = Arc::new(Mutex::new(writer_a));
+    let history_reader = tokio::spawn(async move {
+        let mut reader = BufReader::new(stream_b);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .expect("read catalog response");
+        serde_json::from_str::<ServerEvent>(line.trim()).expect("decode catalog response")
+    });
+
+    let delivered_key =
+        handle_get_model_catalog(1, "session_oversized_catalog_projection", &agent, &writer)
+            .await
+            .expect("write catalog response")
+            .expect("catalog response key");
+    let history_event = history_reader.await.expect("join catalog reader");
+    assert!(matches!(history_event, ServerEvent::History { .. }));
+
+    let bus_event = try_available_models_updated_event(&agent).expect("live catalog event");
+    let (_, bus_key) =
+        available_models_event_for_live_update(bus_event).expect("projected bus catalog");
+
+    assert_eq!(
+        delivered_key, bus_key,
+        "an unchanged bus update must not downgrade the catalog response"
+    );
 }
 
 #[tokio::test]

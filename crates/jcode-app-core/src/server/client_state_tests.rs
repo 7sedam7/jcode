@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::io::BufRead as _;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock, mpsc};
@@ -41,6 +42,166 @@ impl Provider for MockProvider {
 
     fn model(&self) -> String {
         "mock-model".to_string()
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        vec!["gpt-5.6-sol".to_string()]
+    }
+
+    fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
+        vec![crate::provider::ModelRoute {
+            model: "gpt-5.6-sol".to_string(),
+            provider: "Copilot".to_string(),
+            api_method: "copilot".to_string(),
+            available: true,
+            detail: "optional route detail".repeat(32),
+            cheapness: None,
+        }]
+    }
+}
+
+#[derive(Clone)]
+struct NamesOnlyProvider {
+    name: &'static str,
+    prefetch_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for NamesOnlyProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Err(anyhow::anyhow!("not used"))
+    }
+
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+
+    fn model(&self) -> String {
+        "gpt-5.6-sol".to_string()
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        vec!["gpt-5.6-sol".to_string()]
+    }
+
+    async fn prefetch_models(&self) -> Result<()> {
+        self.prefetch_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn attach_prefetch_runs_when_model_names_exist_without_routes() {
+    let prefetch_calls = Arc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(NamesOnlyProvider {
+        name: "names-only-prefetch-test",
+        prefetch_calls: Arc::clone(&prefetch_calls),
+    });
+    let session = crate::session::Session::create_with_id(
+        "session_names_only_prefetch".to_string(),
+        None,
+        Some("names only prefetch".to_string()),
+    );
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        Registry::empty(),
+        session,
+        None,
+    )));
+
+    super::spawn_model_prefetch_update(agent, false);
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while prefetch_calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("names-only catalog should trigger route prefetch");
+    assert_eq!(prefetch_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test intentionally keeps the agent busy while History uses its persisted fallback"
+)]
+async fn busy_history_fallback_still_prefetches_missing_model_routes() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("create temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let prefetch_calls = Arc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(NamesOnlyProvider {
+        name: "busy-names-only-prefetch-test",
+        prefetch_calls: Arc::clone(&prefetch_calls),
+    });
+    let session_id = "session_busy_names_only_prefetch";
+    let mut session = crate::session::Session::create_with_id(
+        session_id.to_string(),
+        None,
+        Some("busy names-only prefetch".to_string()),
+    );
+    session.model = Some("gpt-5.6-sol".to_string());
+    session.save().expect("save session");
+
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        Registry::empty(),
+        session,
+        None,
+    )));
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        session_id.to_string(),
+        Arc::clone(&agent),
+    )])));
+    let client_connections = Arc::new(RwLock::new(HashMap::<String, ClientConnectionInfo>::new()));
+    let client_count = Arc::new(RwLock::new(1usize));
+    let (stream_a, _stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let (_reader_a, writer_a) = stream_a.into_split();
+    let writer = Arc::new(Mutex::new(writer_a));
+    let busy_guard = agent.lock().await;
+
+    handle_get_history(
+        40,
+        session_id,
+        true,
+        &agent,
+        &sessions,
+        &client_connections,
+        &client_count,
+        &writer,
+        "server-name",
+        "🔥",
+        None,
+    )
+    .await
+    .expect("persisted History should be written while the agent is busy");
+
+    drop(busy_guard);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while prefetch_calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("busy History fallback should still trigger route prefetch");
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
     }
 }
 
@@ -98,6 +259,90 @@ async fn session_activity_snapshot_uses_fallback_when_no_live_connection_is_mark
 
     assert!(snapshot.is_processing);
     assert_eq!(snapshot.current_tool_name, None);
+}
+
+#[tokio::test]
+async fn handle_get_history_includes_full_model_routes_when_the_catalog_fits() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let session_id = "session_history_compact_routes";
+    let session = crate::session::Session::create_with_id(
+        session_id.to_string(),
+        None,
+        Some("compact routes".to_string()),
+    );
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        Registry::empty(),
+        session,
+        None,
+    )));
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        session_id.to_string(),
+        Arc::clone(&agent),
+    )])));
+    let client_connections = Arc::new(RwLock::new(HashMap::<String, ClientConnectionInfo>::new()));
+    let client_count = Arc::new(RwLock::new(1usize));
+    let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let (_reader_a, writer_a) = stream_a.into_split();
+    let writer = Arc::new(Mutex::new(writer_a));
+
+    let delivered_catalog_key = handle_get_history(
+        41,
+        session_id,
+        true,
+        &agent,
+        &sessions,
+        &client_connections,
+        &client_count,
+        &writer,
+        "server-name",
+        "🔥",
+        None,
+    )
+    .await
+    .expect("history should be written");
+
+    drop(writer);
+    let mut bytes = Vec::new();
+    stream_b
+        .read_to_end(&mut bytes)
+        .await
+        .expect("read history event bytes");
+    let mut cursor = std::io::Cursor::new(bytes);
+    let mut line = String::new();
+    cursor.read_line(&mut line).expect("read history event");
+    let event: crate::protocol::ServerEvent =
+        serde_json::from_str(line.trim()).expect("decode history event");
+
+    let crate::protocol::ServerEvent::History {
+        available_models,
+        available_model_routes,
+        ..
+    } = event
+    else {
+        panic!("expected history event");
+    };
+    assert_eq!(available_models, ["gpt-5.6-sol"]);
+    assert_eq!(available_model_routes.len(), 1);
+    let route = &available_model_routes[0];
+    assert_eq!(route.model, "gpt-5.6-sol");
+    assert_eq!(route.provider, "Copilot");
+    assert_eq!(route.api_method, "copilot");
+    assert!(route.available);
+    assert_eq!(route.detail, "optional route detail".repeat(32));
+    assert!(route.cheapness.is_none());
+    let expected_catalog_key = super::super::available_models_dedup::available_models_dedup_key(
+        &crate::protocol::ServerEvent::AvailableModelsUpdated {
+            provider_name: Some("mock".to_string()),
+            provider_model: Some("mock-model".to_string()),
+            available_models,
+            available_model_routes,
+        },
+    );
+    assert_eq!(
+        delivered_catalog_key.as_deref(),
+        Some(expected_catalog_key.as_str())
+    );
 }
 
 #[tokio::test]
@@ -160,7 +405,6 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
         session_id,
         true,
         &agent,
-        &provider,
         &sessions,
         &client_connections,
         &client_count,
@@ -192,6 +436,8 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
             session_id: returned_session_id,
             messages,
             activity,
+            available_models,
+            available_model_routes,
             ..
         } => {
             assert_eq!(id, 42);
@@ -200,6 +446,8 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
             assert_eq!(messages[0].content, "persisted fallback history");
             let activity = activity.expect("fallback activity snapshot");
             assert!(activity.is_processing);
+            assert!(available_models.is_empty());
+            assert!(available_model_routes.is_empty());
         }
         other => panic!("expected history event, got {:?}", other),
     }
@@ -244,9 +492,9 @@ async fn handle_get_model_catalog_does_not_wait_for_busy_agent_lock() {
     let (_reader_a, writer_a) = stream_a.into_split();
     let writer = Arc::new(Mutex::new(writer_a));
 
-    tokio::time::timeout(
+    let delivered_catalog_key = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        handle_get_model_catalog(43, session_id, &agent, &provider, &writer),
+        handle_get_model_catalog(43, session_id, &agent, &writer),
     )
     .await
     .expect("model catalog must not wait for busy agent mutex")
@@ -265,6 +513,11 @@ async fn handle_get_model_catalog_does_not_wait_for_busy_agent_lock() {
     cursor.read_line(&mut line).expect("read first line");
     let event: crate::protocol::ServerEvent =
         serde_json::from_str(line.trim()).expect("decode model catalog event");
+    assert_eq!(
+        delivered_catalog_key,
+        super::history_catalog_snapshot_key(&event),
+        "catalog request must return the key for the exact History payload it emitted"
+    );
 
     match event {
         crate::protocol::ServerEvent::History {

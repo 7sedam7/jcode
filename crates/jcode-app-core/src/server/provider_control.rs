@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
+use super::client_state::model_catalog_event_for_delivery;
 use crate::agent::Agent;
 use crate::auth::lifecycle::{AuthActivationRequest, AuthActivationResult};
 use crate::protocol::{AuthChanged, NotificationType, ServerEvent};
@@ -56,6 +57,29 @@ fn available_models_snapshot_into_event(snapshot: ModelCatalogSnapshot) -> Serve
         available_models: snapshot.available_models,
         available_model_routes: snapshot.model_routes,
     }
+}
+
+fn send_available_models_update(
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event: ServerEvent,
+) {
+    let Some((event, _)) = model_catalog_event_for_delivery(event) else {
+        crate::logging::warn(
+            "Skipping model catalog update because its names-only representation exceeds the delivery limit",
+        );
+        return;
+    };
+    let _ = client_event_tx.send(event);
+}
+
+fn send_available_models_snapshot(
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    snapshot: ModelCatalogSnapshot,
+) {
+    send_available_models_update(
+        client_event_tx,
+        available_models_snapshot_into_event(snapshot),
+    );
 }
 
 fn available_models_updated_event_from_agent(agent: &Agent) -> ServerEvent {
@@ -729,7 +753,7 @@ pub(super) async fn handle_refresh_models(
                 );
                 crate::bus::Bus::global().publish_models_updated();
                 let event = available_models_updated_event(&agent_clone).await;
-                let _ = client_event_tx_clone.send(event);
+                send_available_models_update(&client_event_tx_clone, event);
                 send_catalog_activity(
                     &client_event_tx_clone,
                     &crate::message::format_model_refresh_progress_markdown(
@@ -1096,9 +1120,7 @@ pub(super) async fn handle_notify_auth_changed(
         // the model picker/header stop looking stale right after login, then
         // push another snapshot when the background refresh announces itself.
         let mut latest_snapshot = available_models_snapshot(&agent_clone).await;
-        let _ = client_event_tx_clone.send(available_models_snapshot_into_event(
-            latest_snapshot.clone(),
-        ));
+        send_available_models_snapshot(&client_event_tx_clone, latest_snapshot.clone());
 
         // Wait for the catalog work that providers actually launched. The old
         // implementation waited for two stacked 750 ms debounce windows even
@@ -1117,7 +1139,10 @@ pub(super) async fn handle_notify_auth_changed(
                     if matches!(event, Ok(crate::bus::BusEvent::ModelsUpdated)) {
                         model_update_events = model_update_events.saturating_add(1);
                         latest_snapshot = available_models_snapshot(&agent_clone).await;
-                        let _ = client_event_tx_clone.send(available_models_snapshot_into_event(latest_snapshot.clone()));
+                        send_available_models_snapshot(
+                            &client_event_tx_clone,
+                            latest_snapshot.clone(),
+                        );
                     }
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
@@ -1127,9 +1152,7 @@ pub(super) async fn handle_notify_auth_changed(
             .iter()
             .any(|provider| provider.auth_model_refresh_pending());
         latest_snapshot = available_models_snapshot(&agent_clone).await;
-        let _ = client_event_tx_clone.send(available_models_snapshot_into_event(
-            latest_snapshot.clone(),
-        ));
+        send_available_models_snapshot(&client_event_tx_clone, latest_snapshot.clone());
         let settle_ms = settle_started.elapsed().as_millis();
 
         if !auth_refresh_is_current(&session_id, auth_refresh_generation) {
@@ -1159,9 +1182,7 @@ pub(super) async fn handle_notify_auth_changed(
                 &[("reason", "user_selected_provider_model_during_refresh")],
             );
             latest_snapshot = available_models_snapshot(&agent_clone).await;
-            let _ = client_event_tx_clone.send(available_models_snapshot_into_event(
-                latest_snapshot.clone(),
-            ));
+            send_available_models_snapshot(&client_event_tx_clone, latest_snapshot.clone());
         } else {
             if prefer_strongest {
                 if let Some(route) = crate::auth::lifecycle::globally_preferred_default_route(
@@ -1190,9 +1211,7 @@ pub(super) async fn handle_notify_auth_changed(
                 .await;
             }
             latest_snapshot = available_models_snapshot(&agent_clone).await;
-            let _ = client_event_tx_clone.send(available_models_snapshot_into_event(
-                latest_snapshot.clone(),
-            ));
+            send_available_models_snapshot(&client_event_tx_clone, latest_snapshot.clone());
         }
 
         let summary = crate::provider::summarize_model_catalog_refresh(
@@ -1342,7 +1361,7 @@ fn spawn_account_switch_refresh(
 
         crate::bus::Bus::global().publish_models_updated();
         let event = available_models_updated_event(&agent).await;
-        let _ = client_event_tx.send(event);
+        send_available_models_update(&client_event_tx, event);
         let _ = client_event_tx.send(ServerEvent::Done { id });
         crate::logging::event_info(
             "SERVER_PROVIDER_CONTROL_ACCOUNT_SWITCH",

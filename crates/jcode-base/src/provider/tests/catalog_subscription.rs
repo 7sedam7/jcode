@@ -330,7 +330,7 @@ fn test_filtered_display_models_respects_curated_subscription_catalog() {
 }
 
 #[test]
-fn test_remote_jcode_subscription_fallback_keeps_managed_route_identity() {
+fn test_remote_jcode_subscription_names_only_fallback_is_neutral() {
     let models = vec![
         "claude-opus-4-8".to_string(),
         "claude-sonnet-4-6".to_string(),
@@ -355,9 +355,7 @@ fn test_remote_jcode_subscription_fallback_keeps_managed_route_identity() {
         ]
     );
     assert!(routes.iter().all(|route| {
-        route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-            && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
-            && route.available
+        route.provider == "remote" && route.api_method == "remote-catalog" && !route.available
     }));
 }
 
