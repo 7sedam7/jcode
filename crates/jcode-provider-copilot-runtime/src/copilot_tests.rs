@@ -61,6 +61,51 @@ fn switching_list_matches_the_display_list() {
     assert_eq!(provider.available_models_for_switching(), fetched);
 }
 
+#[test]
+fn image_input_support_follows_the_live_model_catalog() {
+    let infos: Vec<jcode_base::auth::copilot::CopilotModelInfo> =
+        serde_json::from_value(serde_json::json!([
+            {
+                "id": "gpt-5.6-sol",
+                "capabilities": {
+                    "supports": { "vision": true }
+                }
+            },
+            {
+                "id": "text-only-model",
+                "capabilities": {
+                    "supports": { "vision": false }
+                }
+            }
+        ]))
+        .expect("valid model catalog");
+    let provider = make_test_provider(infos.iter().map(|info| info.id.clone()).collect());
+    *provider.model_specs.write().unwrap() = CatalogSpecs::from_models(&infos);
+
+    provider.set_model("gpt-5.6-sol").unwrap();
+    assert!(
+        Provider::supports_image_input(&provider),
+        "the shared image gate must retain images for GPT-5.6 Sol"
+    );
+
+    provider.set_model("text-only-model").unwrap();
+    assert!(
+        !Provider::supports_image_input(&provider),
+        "catalog-declared text-only models must still reject image input"
+    );
+}
+
+#[test]
+fn image_input_is_preserved_while_catalog_capability_is_unknown() {
+    let provider = make_test_provider(vec!["new-vision-model".to_string()]);
+    provider.set_model("new-vision-model").unwrap();
+
+    assert!(
+        Provider::supports_image_input(&provider),
+        "an empty or legacy ids-only cache must not discard an image before the request-time catalog refresh"
+    );
+}
+
 #[tokio::test]
 async fn prefetch_is_never_skipped_while_the_catalog_is_empty() {
     // The grace window deduplicates a startup burst. If it also suppressed the

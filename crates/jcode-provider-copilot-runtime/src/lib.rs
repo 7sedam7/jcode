@@ -458,15 +458,6 @@ impl CopilotApiProvider {
         let max_tokens: u32 = 32_768;
         let initiator = if is_user_initiated { "user" } else { "agent" };
         let has_images = raw.has_images();
-        // A model that does not advertise vision returns an opaque 400 for image
-        // parts, so say plainly what happened instead of letting it look like a
-        // transport fault.
-        if has_images && !self.model_supports_vision(&model) {
-            jcode_base::logging::warn(&format!(
-                "Copilot model '{model}' does not advertise vision support; \
-                 the attached image will likely be rejected. Switch models with /model."
-            ));
-        }
         let api_base = request_base_url();
 
         const MAX_RETRIES: u32 = 3;
@@ -520,6 +511,16 @@ impl CopilotApiProvider {
             // model GitHub added since that cache was written is picker-visible
             // but undescribed. Fetch before guessing.
             let endpoint = self.endpoint_for_model(&model, &bearer_token).await;
+
+            // Check vision only after endpoint_for_model has refreshed an unknown
+            // model's spec. Checking first would emit a false warning for a vision
+            // model restored from an older ids-only catalog cache.
+            if has_images && !self.model_supports_vision(&model) {
+                jcode_base::logging::warn(&format!(
+                    "Copilot model '{model}' does not advertise vision support; \
+                     the attached image will likely be rejected. Switch models with /model."
+                ));
+            }
 
             // Never ask for more output than the model actually allows: the
             // catalog caps range from 4k (gpt-4o) to 128k (gpt-5.x), and the
@@ -931,6 +932,19 @@ impl Provider for CopilotApiProvider {
             .try_read()
             .map(|m| m.clone())
             .unwrap_or_else(|_| DEFAULT_MODEL.to_string())
+    }
+
+    fn supports_image_input(&self) -> bool {
+        let model = self.model();
+        self.model_specs
+            .read()
+            .ok()
+            .and_then(|specs| specs.get(&model).map(|spec| spec.supports_vision))
+            // Preserve images until the live catalog answers. Copilot can accept
+            // the raw blocks and refreshes an unknown model's spec before choosing
+            // its endpoint; returning false here would irreversibly replace the
+            // image in MultiProvider before that refresh can happen.
+            .unwrap_or(true)
     }
 
     fn set_model(&self, model: &str) -> Result<()> {

@@ -99,3 +99,12 @@ fn output_caps_are_read_from_the_catalog() {
     );
     assert_eq!(find(&models, "gpt-5.5").max_output_tokens(), Some(128_000));
 }
+
+#[test]
+fn gpt_5_6_sol_advertises_vision_support() {
+    let models = catalog();
+    assert!(
+        find(&models, "gpt-5.6-sol").supports_vision(),
+        "the shared provider gate must preserve images for GPT-5.6 Sol"
+    );
+}

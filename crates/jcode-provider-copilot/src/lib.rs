@@ -75,6 +75,31 @@ pub fn add_max_token_parameter(body: &mut Value, model: &str, max_tokens: u32) {
 pub fn build_messages(system: &str, messages: &[ChatMessage]) -> Vec<Value> {
     let mut result = Vec::new();
     let missing_output = format!("[Error] {}", TOOL_OUTPUT_MISSING_TEXT);
+    let user_content = |mut parts: Vec<Value>| -> Option<Value> {
+        parts.retain(|part| {
+            part.get("type").and_then(Value::as_str) != Some("text")
+                || part
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty())
+        });
+        if parts.is_empty() {
+            return None;
+        }
+        if parts
+            .iter()
+            .all(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+        {
+            return Some(json!(
+                parts
+                    .iter()
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+        Some(Value::Array(parts))
+    };
 
     if !system.is_empty() {
         result.push(json!({
@@ -101,11 +126,22 @@ pub fn build_messages(system: &str, messages: &[ChatMessage]) -> Vec<Value> {
     for (idx, msg) in messages.iter().enumerate() {
         match msg.role {
             Role::User => {
-                let mut text_parts: Vec<&str> = Vec::new();
+                let mut user_parts = Vec::new();
                 for block in &msg.content {
                     match block {
                         ContentBlock::Text { text, .. } => {
-                            text_parts.push(text.as_str());
+                            user_parts.push(json!({
+                                "type": "text",
+                                "text": text,
+                            }));
+                        }
+                        ContentBlock::Image { media_type, data } => {
+                            user_parts.push(json!({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": format!("data:{};base64,{}", media_type, data),
+                                },
+                            }));
                         }
                         ContentBlock::ToolResult {
                             tool_use_id,
@@ -137,11 +173,10 @@ pub fn build_messages(system: &str, messages: &[ChatMessage]) -> Vec<Value> {
                     }
                 }
 
-                let text = text_parts.join("\n");
-                if !text.is_empty() {
+                if let Some(content) = user_content(user_parts) {
                     result.push(json!({
                         "role": "user",
-                        "content": text,
+                        "content": content,
                     }));
                 }
             }
@@ -258,6 +293,93 @@ pub fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copilot_chat_messages_preserve_image_parts() {
+        let messages = vec![ChatMessage {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "describe this".to_string(),
+                    cache_control: None,
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "aW1hZ2U=".to_string(),
+                },
+            ],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+
+        let built = build_messages("", &messages);
+        assert_eq!(built[0]["role"], "user");
+        assert_eq!(built[0]["content"][0]["type"], "text");
+        assert_eq!(built[0]["content"][0]["text"], "describe this");
+        assert_eq!(built[0]["content"][1]["type"], "image_url");
+        assert_eq!(
+            built[0]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,aW1hZ2U="
+        );
+    }
+
+    #[test]
+    fn copilot_chat_messages_skip_empty_user_text() {
+        let messages = vec![ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: String::new(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+
+        assert!(build_messages("", &messages).is_empty());
+    }
+
+    #[test]
+    fn copilot_chat_messages_keep_tool_results_before_mixed_user_content() {
+        let messages = vec![
+            ChatMessage {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call-1".to_string(),
+                    name: "screenshot".to_string(),
+                    input: json!({}),
+                    thought_signature: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "look at this".to_string(),
+                        cache_control: None,
+                    },
+                    ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: "aW1hZ2U=".to_string(),
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call-1".to_string(),
+                        content: "captured".to_string(),
+                        is_error: None,
+                    },
+                ],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+        ];
+
+        let built = build_messages("", &messages);
+        assert_eq!(built[0]["role"], "assistant");
+        assert_eq!(built[1]["role"], "tool");
+        assert_eq!(built[2]["role"], "user");
+        assert_eq!(built[2]["content"][1]["type"], "image_url");
+    }
 
     fn swarm_shaped_tool() -> ToolDefinition {
         ToolDefinition {
