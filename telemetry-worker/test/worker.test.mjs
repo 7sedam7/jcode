@@ -485,6 +485,27 @@ test("discovery telemetry accepts the catalog suggest phase", async () => {
   assert.equal(detailInsert.values[columns.indexOf("phase")], "suggest");
 });
 
+test("discovery telemetry accepts and persists the catalog details phase", async () => {
+  const db = makeDb();
+  const discoveryFirehose = makeFirehose();
+  const response = await worker.fetch(
+    postRequest(makeDiscoveryBody({
+      phase: "details",
+      selected_tool: "agentcard",
+      result_count: 1,
+    })),
+    { DB: db, FIREHOSE_DISCOVERY: discoveryFirehose },
+    makeCtx(),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(discoveryFirehose.points[0].blobs[8], "details");
+  assert.equal(discoveryFirehose.points[0].blobs[10], "agentcard");
+  const detailInsert = db.executed.find(({ sql }) => /INSERT OR IGNORE INTO discovery_details/.test(sql));
+  const columns = detailInsert.sql.match(/\(([^)]+)\)/)[1].split(", ");
+  assert.equal(detailInsert.values[columns.indexOf("phase")], "details");
+  assert.equal(detailInsert.values[columns.indexOf("selected_tool")], "agentcard");
+});
+
 test("discovery event rejects unknown failure classifications", async () => {
   const response = await worker.fetch(
     postRequest(makeDiscoveryBody({ outcome: "failure", failure_reason: "raw secret error" })),
@@ -1159,6 +1180,30 @@ test("lifecycle events stamp last_country on the DAU rollup", async () => {
   // last_country is the final bound placeholder (raw_active is a literal 1, so
   // column positions and bind positions are intentionally not aligned).
   assert.equal(dau.values[dau.values.length - 1], "JP");
+});
+
+test("CI-built artifacts count as releases without becoming runtime CI", async () => {
+  const db = makeDb();
+  const response = await worker.fetch(
+    postRequest(makeBody({
+      event: "session_end",
+      event_id: "se-ci-built-release",
+      build_channel: "ci_release",
+      is_ci: false,
+      turns: 1,
+    })),
+    { DB: db },
+    makeCtx(),
+  );
+  assert.equal(response.status, 200);
+
+  const dau = db.executed.find(({ sql }) => /INSERT INTO daily_active_users/.test(sql));
+  assert.ok(dau, "daily_active_users rollup should be written");
+  assert.equal(dau.values[3], 1, "CI-built binary remains release activity");
+  assert.equal(dau.values[4], 1, "meaningful CI-built work remains release activity");
+  assert.equal(dau.values[9], 0, "build provenance must not imply runtime CI");
+  assert.equal(dau.values[10], 0, "last runtime CI flag remains false");
+  assert.equal(dau.values[11], "ci_release");
 });
 
 test("client-supplied country is ignored and bogus codes are dropped", async () => {

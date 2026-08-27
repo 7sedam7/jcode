@@ -1637,6 +1637,7 @@ impl App {
                 // leave incomplete todos would never be poked. Stay armed and
                 // simply do nothing this turn.
                 crate::logging::info("AUTO_POKE_DECISION action=idle reason=no_todos incomplete=0");
+                self.todo_final_response_requested = false;
                 return false;
             }
             // Deferred quality checks land here, once, instead of interrupting
@@ -1684,7 +1685,7 @@ impl App {
                     crate::telemetry::record_todo_gate(
                         crate::telemetry::TodoGateKind::ConfidenceSpike,
                     );
-                    "🔍 Double-checking a confidence jump for you..."
+                    "🔍 Double-checking confidence jumps..."
                 };
                 self.push_display_message(DisplayMessage::system(notice));
                 // User-role content: reminder-only turns read as empty user
@@ -1722,20 +1723,31 @@ impl App {
             // it stays armed so the next batch of work is covered too; only an
             // explicit /poke off (or a circuit breaker above) disarms it.
             self.auto_poke_incomplete_todos = self.auto_poke_default_on;
-            self.todo_confidence_spike_challenged = false;
             // A finished cycle re-arms the review for whatever work comes next;
             // without this a session could only ever deliver one digest.
             self.todo_gate_digest_delivered = false;
             self.todo_completion_gate_attempts = 0;
-            self.push_display_message(DisplayMessage::system(format!(
-                "✅ All todos done. Completion confidence: {}.",
-                confidence_label
-            )));
+            if !self.todo_final_response_requested {
+                self.todo_final_response_requested = true;
+                self.push_display_message(DisplayMessage::system(format!(
+                    "✅ All todos done. Completion confidence: {}.",
+                    confidence_label
+                )));
+                self.queued_messages
+                    .push(crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string());
+                self.pending_queued_dispatch = true;
+                return true;
+            }
             self.pending_queued_dispatch = false;
             return false;
         }
 
         let poke_message = super::commands::build_poke_message(&incomplete);
+        self.todo_final_response_requested = false;
+        // Open work begins a new completion cycle. Keep the prior spike check
+        // latched until this point so the synthetic final-response turn cannot
+        // retrigger the same evidence gate against unchanged completed todos.
+        self.todo_confidence_spike_challenged = false;
         let fingerprint =
             serde_json::to_string(&incomplete).unwrap_or_else(|_| poke_message.clone());
         if self.last_auto_poke_fingerprint.as_ref() == Some(&fingerprint) {
@@ -2479,7 +2491,7 @@ fn handle_inline_image_toggle_shortcut(app: &mut App, key: char) -> bool {
     true
 }
 
-fn handle_expand_edit_badge_shortcut(app: &mut App, key: char) -> bool {
+pub(super) fn handle_expand_edit_badge_shortcut(app: &mut App, key: char) -> bool {
     if !key.eq_ignore_ascii_case(&'e') {
         return false;
     }
@@ -2528,18 +2540,7 @@ pub(super) fn handle_modal_key(
         return Ok(true);
     }
 
-    if app.changelog_scroll.is_some() {
-        app.handle_changelog_key(code)?;
-        return Ok(true);
-    }
-
-    if app.help_scroll.is_some() {
-        app.handle_help_key(code)?;
-        return Ok(true);
-    }
-
-    if app.model_status_scroll.is_some() {
-        app.handle_model_status_key(code)?;
+    if handle_scroll_overlay_key(app, code)? {
         return Ok(true);
     }
 
@@ -2597,6 +2598,20 @@ pub(super) fn handle_modal_key(
     }
 
     Ok(false)
+}
+
+pub(super) fn handle_scroll_overlay_key(app: &mut App, code: KeyCode) -> Result<bool> {
+    if app.changelog_scroll.is_some() {
+        app.handle_changelog_key(code)?;
+    } else if app.help_scroll.is_some() {
+        app.handle_help_key(code)?;
+    } else if app.model_status_scroll.is_some() {
+        app.handle_model_status_key(code)?;
+    } else {
+        return Ok(false);
+    }
+
+    Ok(true)
 }
 
 pub(super) fn handle_global_control_shortcuts(
@@ -2887,6 +2902,9 @@ impl App {
         // Alt+5 always starts the onboarding simulator from a pristine first
         // screen, even when another modal or a previous sim screen is active.
         if self.handle_onboarding_sim_reset_shortcut(code, modifiers) {
+            return Ok(());
+        }
+        if self.handle_update_sim_shortcut(code, modifiers) {
             return Ok(());
         }
 
