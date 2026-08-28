@@ -2493,6 +2493,8 @@ async fn run_single_message_with_agent(
     emit_json: bool,
     emit_ndjson: bool,
 ) -> Result<()> {
+    let mut herdr_reporter = crate::herdr::Reporter::from_env();
+    herdr_reporter.report_working(agent.session_id());
     let result: Result<()> = async {
         if emit_json {
             let text = run_single_message_command_capture_with_auto_poke(agent, message).await?;
@@ -2512,6 +2514,8 @@ async fn run_single_message_with_agent(
         Ok(())
     }
     .await;
+
+    herdr_reporter.report_idle(agent.session_id());
 
     // `Agent::new` and session restore both register this process as the active
     // owner. Unlike the interactive lifecycle, `jcode run` has no later quit

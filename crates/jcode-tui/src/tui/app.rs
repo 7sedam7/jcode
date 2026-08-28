@@ -68,6 +68,7 @@ mod dictation;
 mod event_wrappers;
 mod handterm_native_scroll;
 pub(crate) mod helpers;
+mod herdr;
 mod hotkey_feedback;
 pub(crate) mod idle_animation_repaint;
 mod idle_heap_release;
@@ -859,6 +860,10 @@ pub struct App {
     auto_scroll_paused: bool,
     active_skill: Option<String>,
     is_processing: bool,
+    /// A remote command is waiting for terminal input that this TUI cannot yet
+    /// proxy. Herdr should surface the pane as blocked instead of working.
+    herdr_blocked_message: Option<String>,
+    herdr_blocked_tool_call_id: Option<String>,
     // Live streaming/turn progress (text, per-turn tokens, TPS tracking).
     streaming: StreamingProgress,
     /// Keeps the machine awake while a turn is processing/streaming.

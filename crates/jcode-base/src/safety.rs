@@ -508,6 +508,30 @@ fn request_session_id(request: &PermissionRequest) -> Option<String> {
         })
 }
 
+/// Return a concise description of the oldest pending approval for `session_id`.
+///
+/// Pane integrations use this to distinguish an idle completed turn from a
+/// session that is specifically waiting for the user's decision.
+pub fn pending_permission_message(session_id: &str) -> Option<String> {
+    let queue: Vec<PermissionRequest> = queue_path()
+        .ok()
+        .and_then(|path| storage::read_json(&path).ok())
+        .unwrap_or_default();
+    queue
+        .into_iter()
+        .find(|request| request_session_id(request).as_deref() == Some(session_id))
+        .map(|request| {
+            if request.description.trim().is_empty() {
+                format!("Permission needed: {}", request.action)
+            } else {
+                format!(
+                    "Permission needed: {} — {}",
+                    request.action, request.description
+                )
+            }
+        })
+}
+
 // ---------------------------------------------------------------------------
 // ID generation helper
 // ---------------------------------------------------------------------------
@@ -616,6 +640,29 @@ mod tests {
             }
 
             assert_eq!(sys.pending_requests().len(), baseline + 1);
+        });
+    }
+
+    #[test]
+    fn pending_permission_message_is_scoped_to_its_session() {
+        with_temp_home(|| {
+            let sys = SafetySystem::new();
+            sys.request_permission(PermissionRequest {
+                id: "req_herdr_blocked".to_string(),
+                action: "deploy".to_string(),
+                description: "Deploy the release".to_string(),
+                rationale: "Release is ready".to_string(),
+                urgency: Urgency::High,
+                wait: true,
+                created_at: Utc::now(),
+                context: Some(serde_json::json!({ "session_id": "ses_blocked" })),
+            });
+
+            assert_eq!(
+                pending_permission_message("ses_blocked").as_deref(),
+                Some("Permission needed: deploy — Deploy the release")
+            );
+            assert_eq!(pending_permission_message("ses_other"), None);
         });
     }
 

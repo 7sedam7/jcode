@@ -94,6 +94,7 @@ pub fn ensure_intent_in_schema(mut schema: Value) -> Value {
 /// A request for stdin input from a running command.
 pub struct StdinInputRequest {
     pub request_id: String,
+    pub tool_call_id: String,
     pub prompt: String,
     pub is_password: bool,
     pub response_tx: tokio::sync::oneshot::Sender<String>,

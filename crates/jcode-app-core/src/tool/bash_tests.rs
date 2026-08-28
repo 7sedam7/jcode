@@ -118,6 +118,7 @@ async fn test_stdin_forwarding_single_line() {
         .expect("channel closed");
 
     assert!(req.request_id.starts_with("stdin-test-call-"));
+    assert_eq!(req.tool_call_id, "test-call");
     assert!(!req.is_password);
 
     // Send the response

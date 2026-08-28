@@ -581,6 +581,11 @@ pub(in crate::tui::app) fn handle_server_event(
         app.last_stream_activity = Some(Instant::now());
     }
 
+    if matches!(&event, ServerEvent::Interrupted) {
+        app.herdr_blocked_message = None;
+        app.herdr_blocked_tool_call_id = None;
+    }
+
     if matches!(
         &event,
         ServerEvent::TextDelta { .. }
@@ -740,7 +745,13 @@ pub(in crate::tui::app) fn handle_server_event(
             name,
             output,
             error,
-        } => super::server_event_handlers::handle_tool_done(app, remote, id, name, output, error),
+        } => {
+            if app.herdr_blocked_tool_call_id.as_deref() == Some(id.as_str()) {
+                app.herdr_blocked_message = None;
+                app.herdr_blocked_tool_call_id = None;
+            }
+            super::server_event_handlers::handle_tool_done(app, remote, id, name, output, error)
+        }
         ServerEvent::GeneratedImage {
             id,
             path,
@@ -1162,6 +1173,8 @@ pub(in crate::tui::app) fn handle_server_event(
                 }
                 crate::tui::mermaid::clear_streaming_preview_diagram();
                 app.is_processing = false;
+                app.herdr_blocked_message = None;
+                app.herdr_blocked_tool_call_id = None;
                 app.status = ProcessingStatus::Idle;
                 app.stream_message_ended = false;
                 // Turn completed successfully; drop the saved prompt so a later
@@ -1208,10 +1221,11 @@ pub(in crate::tui::app) fn handle_server_event(
             completed_current_message || auto_poked
         }
         ServerEvent::Error {
+            id,
             message,
             retry_after_secs,
-            ..
         } => {
+            let error_completes_current_message = app.current_message_id == Some(id);
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a
             // reload/reconnect raced the turn-end dispatch: the history
@@ -1294,6 +1308,10 @@ pub(in crate::tui::app) fn handle_server_event(
                 tool_data: None,
             });
             app.is_processing = false;
+            if error_completes_current_message {
+                app.herdr_blocked_message = None;
+                app.herdr_blocked_tool_call_id = None;
+            }
             app.status = ProcessingStatus::Idle;
             app.stream_message_ended = false;
             let recovered_local = recover_local_interleave_to_queue(app, "request error");
@@ -1615,6 +1633,8 @@ pub(in crate::tui::app) fn handle_server_event(
             let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
 
             if session_changed {
+                app.herdr_blocked_message = None;
+                app.herdr_blocked_tool_call_id = None;
                 app.rate_limit_pending_message = None;
                 app.rate_limit_reset = None;
                 app.connection_type = None;
@@ -2843,7 +2863,19 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             false
         }
-        ServerEvent::StdinRequest { .. } => {
+        ServerEvent::StdinRequest {
+            prompt,
+            tool_call_id,
+            ..
+        } => {
+            let prompt = prompt
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .map(str::trim)
+                .unwrap_or("Command needs terminal input");
+            app.herdr_blocked_message = Some(format!("Terminal input needed: {prompt}"));
+            app.herdr_blocked_tool_call_id = Some(tool_call_id);
             app.set_status_notice("⌨ Interactive terminal detected (command will timeout)");
             false
         }

@@ -2255,6 +2255,61 @@ fn test_externally_started_tool_turn_shows_running_tool_status() {
 }
 
 #[test]
+fn stdin_request_marks_herdr_blocked_until_turn_finishes() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("ses_stdin_wait".to_string());
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = runtime.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::StdinRequest {
+            request_id: "stdin_1".to_string(),
+            prompt: "Output so far\nPassword: ".to_string(),
+            is_password: true,
+            tool_call_id: "tool_1".to_string(),
+        },
+        &mut remote,
+    );
+
+    assert_eq!(
+        app.herdr_blocked_message.as_deref(),
+        Some("Terminal input needed: Password:")
+    );
+    assert_eq!(app.herdr_blocked_tool_call_id.as_deref(), Some("tool_1"));
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ToolDone {
+            id: "other_tool".to_string(),
+            name: "bash".to_string(),
+            output: "done".to_string(),
+            error: None,
+        },
+        &mut remote,
+    );
+    assert!(app.herdr_blocked_message.is_some());
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ToolDone {
+            id: "tool_1".to_string(),
+            name: "bash".to_string(),
+            output: "done".to_string(),
+            error: None,
+        },
+        &mut remote,
+    );
+    assert_eq!(app.herdr_blocked_message, None);
+
+    app.herdr_blocked_message = Some("Terminal input needed".to_string());
+    app.herdr_blocked_tool_call_id = Some("tool_2".to_string());
+
+    app.handle_server_event(crate::protocol::ServerEvent::Interrupted, &mut remote);
+    assert_eq!(app.herdr_blocked_message, None);
+    assert_eq!(app.herdr_blocked_tool_call_id, None);
+}
+
+#[test]
 fn test_remote_fork_with_prompt_stages_split_prompt() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();

@@ -677,7 +677,6 @@ pub(super) async fn handle_client(
     let _stdin_forwarder = {
         let client_event_tx = client_event_tx.clone();
         let stdin_responses = stdin_responses.clone();
-        let tool_call_id = String::new();
         tokio::spawn(async move {
             while let Some(req) = stdin_req_rx.recv().await {
                 let request_id = req.request_id.clone();
@@ -689,7 +688,7 @@ pub(super) async fn handle_client(
                     request_id,
                     prompt: req.prompt,
                     is_password: req.is_password,
-                    tool_call_id: tool_call_id.clone(),
+                    tool_call_id: req.tool_call_id,
                 });
             }
         })

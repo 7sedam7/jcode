@@ -991,6 +991,7 @@ impl BashTool {
 
                                     let request = StdinInputRequest {
                                         request_id,
+                                        tool_call_id: tool_call_id.clone(),
                                         prompt: String::new(),
                                         is_password: false,
                                         response_tx,

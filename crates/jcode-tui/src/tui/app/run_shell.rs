@@ -634,6 +634,7 @@ impl App {
     /// Returns Some(session_id) if hot-reload was requested
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<RunResult> {
         super::terminal_liveness::capture_initial_tty();
+        let mut herdr_reporter = herdr::Reporter::from_env();
         let mut event_stream = EventStream::new();
         let mut redraw_period = crate::tui::redraw_interval(&self);
         let mut redraw_interval = redraw_timer(redraw_period);
@@ -650,6 +651,7 @@ impl App {
         }
 
         loop {
+            herdr::sync_local(&mut herdr_reporter, &self);
             self.sync_sleep_guard();
             let desired_redraw = crate::tui::redraw_interval(&self);
             if desired_redraw != redraw_period {
@@ -769,6 +771,7 @@ impl App {
         remote_working_dir: Option<String>,
     ) -> Result<RunResult> {
         super::terminal_liveness::capture_initial_tty();
+        let mut herdr_reporter = herdr::Reporter::from_env();
         let mut event_stream = EventStream::new();
         let mut redraw_period = crate::tui::redraw_interval(&self);
         let mut redraw_interval = redraw_timer(redraw_period);
@@ -858,6 +861,7 @@ impl App {
 
             // Main event loop
             loop {
+                herdr::sync_remote(&mut herdr_reporter, &self);
                 self.sync_sleep_guard();
                 let desired_redraw = crate::tui::redraw_interval(&self);
                 if desired_redraw != redraw_period {

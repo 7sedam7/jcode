@@ -952,6 +952,8 @@ pub(super) fn handle_disconnect(
     }
     let recovered_local = recover_local_interleave_to_queue(app, "disconnect");
     app.current_message_id = None;
+    app.herdr_blocked_message = None;
+    app.herdr_blocked_tool_call_id = None;
     app.last_stream_activity = None;
     app.remote_resume_activity = None;
     let ops = app.stream_buffer.flush();

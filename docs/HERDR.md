@@ -10,37 +10,37 @@ Jcode already:
 
 - forwards `HERDR_ENV`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID`, `HERDR_TAB_ID`, `HERDR_WORKSPACE_ID`, `HERDR_BIN_PATH`, `HERDR_SESSION`, and `HERDR_AGENT` from the requesting client to server-side spawn and focus paths;
 - recognizes Herdr as a masking terminal multiplexer for Mermaid graphics capability detection;
+- reports pane-scoped `idle`, `working`, and `blocked` lifecycle state through Herdr's public CLI when `HERDR_ENV=1` and `HERDR_PANE_ID` are present, using `HERDR_BIN_PATH` when supplied and otherwise resolving `herdr` from `PATH`;
+- attaches the active Jcode session ID to each lifecycle report and releases its reporting authority when the foreground Jcode process exits;
+- reports `blocked` for session-scoped ambient approvals and commands waiting for terminal input;
 - exports stable lifecycle observer hooks for `session_start`, `session_end`, `turn_start`, and `turn_end`;
 - exports `JCODE_HOOK_SESSION_ID`, `JCODE_HOOK_CWD`, event fields, and a JSON `JCODE_HOOK_PAYLOAD`;
 - resumes a native session with `jcode --resume <session-id>`.
 
-## Recommended first Herdr integration
+## Built-in lifecycle reporting
 
-The initial upstream Herdr integration should provide **native session identity plus screen-manifest state**, matching Herdr's Claude Code and Codex model. Jcode's current hooks reliably identify session and turn boundaries, but do not yet provide a complete authoritative `blocked` lifecycle. Reporting only `working` and `idle` as lifecycle authority would suppress Herdr's screen fallback and make approval/question detection worse.
+The foreground Jcode process owns lifecycle reporting because Herdr pane identity belongs to that process rather than the shared Jcode daemon. The daemon may serve several panes and sessions concurrently, so it must not publish pane-scoped state from its inherited environment.
 
-On Jcode `session_start`, the Herdr hook should send one newline-delimited JSON request to `HERDR_SOCKET_PATH`:
+Jcode invokes the Herdr binary asynchronously with reports equivalent to:
 
-```json
-{
-  "id": "herdr:jcode:<unique-request-id>",
-  "method": "pane.report_agent_session",
-  "params": {
-    "pane_id": "<HERDR_PANE_ID>",
-    "source": "herdr:jcode",
-    "agent": "jcode",
-    "seq": 1,
-    "agent_session_id": "<JCODE_HOOK_SESSION_ID>",
-    "session_start_source": "startup"
-  }
-}
+```text
+herdr pane report-agent <pane-id> \
+  --source custom:jcode \
+  --agent jcode \
+  --state working \
+  --agent-session-id <jcode-session-id>
 ```
 
-The sequence must be monotonically increasing for the source. Map Jcode hook sources as follows where possible:
+Reports are serialized by one dedicated worker, deduplicated, sequence-ordered, kept in a small bounded queue, retried after transient failures, and time-bounded. Approval observation also runs off the TUI thread. Reporting never blocks model streaming or terminal input, and process-exit cleanup has its own bounded wait. State maps as follows:
 
-- `create` or `attach` to `startup`
-- `resume` to `resume`
+- awaiting a prompt or a completed turn: `idle`;
+- sending, generating, streaming, or running a tool: `working`;
+- pending ambient approval or a command waiting for stdin: `blocked`, with a concise message;
+- foreground process exit: `pane release-agent`.
 
-Herdr should restore the session with:
+Herdr derives an unseen done state from the `working` to `idle` transition, and uses `blocked` for needs-input attention and notifications. Jcode therefore does not send duplicate notification calls.
+
+Jcode reports its own stable session ID, not an upstream provider conversation ID. A future first-class Herdr restore adapter can resume it with:
 
 ```text
 jcode --resume <agent_session_id>
@@ -69,9 +69,9 @@ Relevant upstream files as of Herdr commit `eacea2daf0b72973173b728936b27478374f
 - `src/detect/mod.rs`
 - `src/terminal/state.rs`
 
-## Future full lifecycle authority
+## Future lifecycle coverage
 
-A later Jcode/Herdr protocol can report `working`, `idle`, `blocked`, and `unknown` through `pane.report_agent`, then call `pane.release_agent` on process exit. Do not enable this authority from turn hooks alone. It needs explicit Jcode events for permission/question blocking, approval resolution, cancellation/interrupt, reconnect/reload transfer, and abnormal termination so Herdr never displays a stale working or idle state.
+The built-in reporter covers Jcode's current structured user-decision paths. If Jcode adds another modal question or approval protocol, that protocol must also feed the foreground reporter before it is considered complete lifecycle coverage. Herdr screen detection can remain a compatibility fallback for older Jcode versions.
 
 Official references:
 
