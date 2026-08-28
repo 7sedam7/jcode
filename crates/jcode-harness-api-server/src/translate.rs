@@ -879,7 +879,13 @@ impl BridgeState {
         match kind {
             "session" => {
                 let session_id = event["session_id"].as_str().unwrap_or("").to_string();
-                self.session_id = Some(session_id.clone());
+                // `session` is a broadcast lifecycle notification. The daemon
+                // sends it for other live sessions too, so it cannot identify
+                // which session this connection is attached to. Attachment
+                // identity comes from the correlated `state` reply below.
+                // Treating this broadcast as connection state made a panel for
+                // session A start rejecting its own commands after session B
+                // announced itself.
                 vec![ServerFrame::event(ApiEvent::SessionStatus {
                     session_id,
                     status: "attached".into(),
@@ -887,14 +893,19 @@ impl BridgeState {
             }
             "state" => {
                 let session_id = event["session_id"].as_str().unwrap_or("").to_string();
-                if !session_id.is_empty() {
-                    self.session_id = Some(session_id.clone());
-                }
                 let id = event["id"].as_u64().unwrap_or(0);
                 if let Some((state_id, api_id)) = self.pending_attach_id
                     && state_id == id
                 {
                     self.pending_attach_id = None;
+                    // `state` snapshots can also be broadcast for other live
+                    // sessions. Only the reply correlated with this connection's
+                    // attach request establishes its identity. Otherwise opening
+                    // a second panel can retarget the first panel's bridge and
+                    // make its next command fail with a wrong-session error.
+                    if !session_id.is_empty() {
+                        self.session_id = Some(session_id.clone());
+                    }
                     let metadata = Self::resolve_session_metadata(&session_id);
                     return vec![ServerFrame::reply(
                         api_id,
