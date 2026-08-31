@@ -10,6 +10,7 @@ fn copilot_available_models_event() -> ServerEvent {
     ServerEvent::AvailableModelsUpdated {
         provider_name: Some("Copilot".to_string()),
         provider_model: Some("gpt-5.6-sol".to_string()),
+        context_window: Some(1_050_000),
         available_models: vec!["gpt-5.6-sol".to_string()],
         available_model_routes: vec![crate::provider::ModelRoute {
             model: "gpt-5.6-sol".to_string(),
@@ -35,6 +36,7 @@ fn compact_available_models_event_preserves_route_identity_and_removes_optional_
     let ServerEvent::AvailableModelsUpdated {
         provider_name,
         provider_model,
+        context_window,
         available_models,
         available_model_routes,
     } = compact
@@ -44,6 +46,7 @@ fn compact_available_models_event_preserves_route_identity_and_removes_optional_
 
     assert_eq!(provider_name.as_deref(), Some("Copilot"));
     assert_eq!(provider_model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(context_window, Some(1_050_000));
     assert_eq!(available_models, ["gpt-5.6-sol"]);
     assert_eq!(available_model_routes.len(), 1);
     let route = &available_model_routes[0];
@@ -62,6 +65,7 @@ fn names_only_available_models_event_removes_routes_entirely() {
     let ServerEvent::AvailableModelsUpdated {
         provider_name,
         provider_model,
+        context_window,
         available_models,
         available_model_routes,
     } = names_only
@@ -71,6 +75,7 @@ fn names_only_available_models_event_removes_routes_entirely() {
 
     assert_eq!(provider_name.as_deref(), Some("Copilot"));
     assert_eq!(provider_model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(context_window, Some(1_050_000));
     assert_eq!(available_models, ["gpt-5.6-sol"]);
     assert!(available_model_routes.is_empty());
 }

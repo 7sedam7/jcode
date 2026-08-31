@@ -414,6 +414,7 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
     let ServerEvent::History {
         provider_name,
         provider_model,
+        context_window,
         available_models,
         connection_type,
         compaction_mode,
@@ -425,6 +426,7 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
     };
     assert_eq!(provider_name.as_deref(), Some("openai"));
     assert_eq!(provider_model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(context_window, None);
     assert_eq!(available_models, vec!["gpt-5.4"]);
     assert_eq!(connection_type.as_deref(), Some("websocket"));
     assert_eq!(
@@ -449,6 +451,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         images: Vec::new(),
         provider_name: Some("openai".to_string()),
         provider_model: Some("gpt-5.4".to_string()),
+        context_window: Some(1_000_000),
         available_models: vec!["gpt-5.4".to_string()],
         available_model_routes: Vec::new(),
         mcp_servers: Vec::new(),
@@ -503,6 +506,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         messages,
         provider_name,
         provider_model,
+        context_window,
         total_tokens,
         token_usage_totals,
         ..
@@ -513,6 +517,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
     assert_eq!(id, 101);
     assert_eq!(provider_name.as_deref(), Some("openai"));
     assert_eq!(provider_model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(context_window, Some(1_000_000));
     assert_eq!(total_tokens, Some((123, 45)));
     assert_eq!(
         token_usage_totals.map(|totals| totals.cache_read_input_tokens),

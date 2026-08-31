@@ -664,6 +664,7 @@ impl App {
             self.remote_available_entries.clone(),
             self.remote_model_options.clone(),
         )
+        .with_context_window(self.remote_context_window)
     }
 
     pub(super) fn replace_remote_model_catalog_snapshot(
@@ -680,9 +681,19 @@ impl App {
         if let Some(model) = snapshot.provider_model
             && self.remote_provider_model.as_deref() != Some(model.as_str())
         {
-            self.update_context_limit_for_model(&model);
             self.remote_provider_model = Some(model);
             provider_meta_changed = true;
+        }
+        let context_window_changed = self.apply_remote_context_window(snapshot.context_window);
+        if snapshot.context_window.is_none() {
+            if provider_meta_changed {
+                self.remote_context_window = None;
+            }
+            if self.remote_context_window.is_none()
+                && let Some(model) = self.remote_provider_model.clone()
+            {
+                self.update_context_limit_for_model(&model);
+            }
         }
         // Shared-server bus chatter rebroadcasts the catalog frequently (every
         // session's refresh fans out to every connected client). When nothing
@@ -690,6 +701,7 @@ impl App {
         // forces a picker-cache rebuild, an ~100KB cache rewrite to disk, and a
         // full-frame redraw on every idle client, which starves the input line.
         let catalog_changed = provider_meta_changed
+            || context_window_changed
             || self.remote_available_entries != snapshot.available_models
             || self.remote_model_options != snapshot.model_routes;
         if !catalog_changed {
@@ -786,6 +798,7 @@ impl App {
         if self.remote_provider_model.is_none() {
             self.remote_provider_model = snapshot.provider_model;
         }
+        self.apply_remote_context_window(snapshot.context_window);
         if self.remote_available_entries.is_empty() {
             self.remote_available_entries = snapshot.available_models;
         }

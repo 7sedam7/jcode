@@ -1026,6 +1026,7 @@ impl Agent {
                     id: 0,
                     model: model_after_stream,
                     provider_name: Some(provider_name),
+                    context_window: Some(self.provider.context_window()),
                     error: None,
                 });
             }

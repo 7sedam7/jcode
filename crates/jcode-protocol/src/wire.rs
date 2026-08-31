@@ -1095,6 +1095,9 @@ pub enum ServerEvent {
         /// Model name (e.g. "claude-sonnet-4-20250514")
         #[serde(skip_serializing_if = "Option::is_none")]
         provider_model: Option<String>,
+        /// Effective context window resolved by the server-side provider.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<usize>,
         /// Available models for this provider
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         available_models: Vec<String>,
@@ -1230,6 +1233,9 @@ pub enum ServerEvent {
         model: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         provider_name: Option<String>,
+        /// Effective context window resolved after switching models.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<usize>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -1280,6 +1286,9 @@ pub enum ServerEvent {
         provider_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_model: Option<String>,
+        /// Effective context window for `provider_model`, resolved by the server.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<usize>,
         available_models: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         available_model_routes: Vec<jcode_provider_core::ModelRoute>,

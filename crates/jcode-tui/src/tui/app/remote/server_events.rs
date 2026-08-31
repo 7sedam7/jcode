@@ -1523,6 +1523,7 @@ pub(in crate::tui::app) fn handle_server_event(
             session_id,
             provider_name,
             provider_model,
+            context_window,
             subagent_model,
             autoreview_enabled,
             autojudge_enabled,
@@ -1634,6 +1635,7 @@ pub(in crate::tui::app) fn handle_server_event(
             let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
 
             if session_changed {
+                app.remote_context_window = None;
                 app.herdr_blocked_message = None;
                 app.herdr_blocked_tool_call_id = None;
                 app.rate_limit_pending_message = None;
@@ -1697,7 +1699,8 @@ pub(in crate::tui::app) fn handle_server_event(
                 provider_model,
                 available_models,
                 available_model_routes,
-            );
+            )
+            .with_context_window(context_window);
             let catalog_outcome = app.replace_remote_model_catalog_snapshot(model_catalog_snapshot);
             app.clear_remote_startup_phase();
             app.session.subagent_model = subagent_model;
@@ -2248,6 +2251,7 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::ModelChanged {
             model,
             provider_name,
+            context_window,
             error,
             ..
         } => {
@@ -2271,12 +2275,15 @@ pub(in crate::tui::app) fn handle_server_event(
                 ));
                 app.set_status_notice("Model switch failed");
             } else {
-                app.update_context_limit_for_model(&model);
-                app.remote_provider_model = Some(model.clone());
-                app.clear_remote_startup_phase();
                 if let Some(ref pname) = provider_name {
                     app.remote_provider_name = Some(pname.clone());
                 }
+                app.remote_provider_model = Some(model.clone());
+                app.remote_context_window = None;
+                if !app.apply_remote_context_window(context_window) {
+                    app.update_context_limit_for_model(&model);
+                }
+                app.clear_remote_startup_phase();
                 app.invalidate_model_picker_cache();
                 if !app.auth_catalog_refresh_pending {
                     app.push_display_message(DisplayMessage::system(format!(
@@ -2291,6 +2298,7 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::AvailableModelsUpdated {
             provider_name,
             provider_model,
+            context_window,
             available_models,
             available_model_routes,
         } => {
@@ -2299,7 +2307,8 @@ pub(in crate::tui::app) fn handle_server_event(
                 provider_model,
                 available_models,
                 available_model_routes,
-            );
+            )
+            .with_context_window(context_window);
             let mut explicit_refresh_summary_shown = false;
             if let Some((before_models, before_routes)) =
                 app.pending_remote_model_refresh_snapshot.take()

@@ -187,8 +187,9 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
             session_id: "session_new".to_string(),
             messages: vec![],
             images: vec![],
-            provider_name: Some("claude".to_string()),
-            provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            provider_name: Some("Copilot".to_string()),
+            provider_model: Some("gpt-5.6-sol".to_string()),
+            context_window: Some(1_050_000),
             subagent_model: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -222,6 +223,8 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
 
     assert_eq!(app.remote_session_id.as_deref(), Some("session_new"));
     assert_eq!(app.connection_type, None);
+    assert_eq!(app.remote_context_window, Some(1_050_000));
+    assert_eq!(app.context_limit, 1_050_000);
 }
 
 #[test]
@@ -242,6 +245,7 @@ fn test_handle_server_event_history_preserves_connection_type_for_same_session_w
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            context_window: None,
             subagent_model: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -323,6 +327,7 @@ fn test_handle_server_event_history_session_change_clears_streaming_preview_diag
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            context_window: None,
             subagent_model: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -425,6 +430,7 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            context_window: None,
             subagent_model: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -533,6 +539,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            context_window: None,
             subagent_model: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -614,6 +621,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
                 images: vec![],
                 provider_name: Some("claude".to_string()),
                 provider_model: Some("claude-sonnet-4-20250514".to_string()),
+                context_window: None,
                 subagent_model: None,
                 autoreview_enabled: None,
                 autojudge_enabled: None,
@@ -715,6 +723,7 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            context_window: None,
             subagent_model: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -804,6 +813,7 @@ fn test_handle_server_event_history_session_change_clears_pending_interleaves() 
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            context_window: None,
             subagent_model: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -1918,6 +1928,7 @@ fn test_pending_startup_notice_survives_history_bootstrap_for_fresh_session() {
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            context_window: None,
             subagent_model: None,
             autoreview_enabled: None,
             autojudge_enabled: None,

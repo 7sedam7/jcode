@@ -290,6 +290,7 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
                     &ServerEvent::AvailableModelsUpdated {
                         provider_name: provider_name.clone(),
                         provider_model: provider_model.clone(),
+                        context_window: None,
                         available_models: available_models.clone(),
                         available_model_routes: available_model_routes.clone(),
                     },

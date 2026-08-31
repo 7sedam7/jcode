@@ -20,6 +20,7 @@ fn test_handle_server_event_available_models_updated_replaces_remote_model_catal
         crate::protocol::ServerEvent::AvailableModelsUpdated {
             provider_name: Some("OpenAI".to_string()),
             provider_model: Some("new-model".to_string()),
+            context_window: None,
             available_models: vec!["new-model".to_string(), "second-model".to_string()],
             available_model_routes: vec![crate::provider::ModelRoute {
                 model: "new-model".to_string(),
@@ -47,6 +48,99 @@ fn test_handle_server_event_available_models_updated_replaces_remote_model_catal
 }
 
 #[test]
+fn copilot_catalog_update_applies_server_reported_context_window() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_remote = true;
+    app.context_limit = 128_000;
+    app.handle_server_event(
+        crate::protocol::ServerEvent::AvailableModelsUpdated {
+            provider_name: Some("Copilot".to_string()),
+            provider_model: Some("gpt-5.6-sol".to_string()),
+            context_window: Some(1_050_000),
+            available_models: vec!["gpt-5.6-sol".to_string()],
+            available_model_routes: Vec::new(),
+        },
+        &mut remote,
+    );
+
+    assert_eq!(app.remote_context_window, Some(1_050_000));
+    assert_eq!(app.context_limit, 1_050_000);
+    assert_eq!(
+        app.registry
+            .compaction()
+            .try_read()
+            .expect("compaction manager")
+            .token_budget(),
+        1_050_000
+    );
+}
+
+#[test]
+fn model_change_applies_server_reported_context_window() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_remote = true;
+    app.context_limit = 128_000;
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ModelChanged {
+            id: 7,
+            model: "gpt-5.6-sol".to_string(),
+            provider_name: Some("Copilot".to_string()),
+            context_window: Some(1_050_000),
+            error: None,
+        },
+        &mut remote,
+    );
+
+    assert_eq!(app.remote_context_window, Some(1_050_000));
+    assert_eq!(app.context_limit, 1_050_000);
+}
+
+#[test]
+fn older_catalog_update_clears_stale_context_when_model_changes() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_remote = true;
+    app.remote_provider_name = Some("Copilot".to_string());
+    app.remote_provider_model = Some("gpt-5.6-sol".to_string());
+    app.remote_context_window = Some(1_050_000);
+    app.context_limit = 1_050_000;
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::AvailableModelsUpdated {
+            provider_name: Some("Copilot".to_string()),
+            provider_model: Some("gpt-4o".to_string()),
+            // An older server cannot report the authoritative value.
+            context_window: None,
+            available_models: vec!["gpt-4o".to_string()],
+            available_model_routes: Vec::new(),
+        },
+        &mut remote,
+    );
+
+    assert_eq!(app.remote_context_window, None);
+    assert_eq!(app.context_limit, 128_000);
+    assert_eq!(
+        app.registry
+            .compaction()
+            .try_read()
+            .expect("compaction manager")
+            .token_budget(),
+        128_000
+    );
+}
+
+#[test]
 fn test_names_only_catalog_update_clears_stale_authoritative_routes() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -69,6 +163,7 @@ fn test_names_only_catalog_update_clears_stale_authoritative_routes() {
         crate::protocol::ServerEvent::AvailableModelsUpdated {
             provider_name: Some("Copilot".to_string()),
             provider_model: Some("gpt-5.6-sol".to_string()),
+            context_window: None,
             available_models: vec!["gpt-5.6-sol".to_string()],
             available_model_routes: Vec::new(),
         },
@@ -107,6 +202,7 @@ fn test_names_only_catalog_update_removes_persisted_authoritative_routes() {
             crate::protocol::ServerEvent::AvailableModelsUpdated {
                 provider_name: Some("Copilot".to_string()),
                 provider_model: Some("gpt-5.6-sol".to_string()),
+                context_window: None,
                 available_models: vec!["gpt-5.6-sol".to_string()],
                 available_model_routes: Vec::new(),
             },
@@ -218,6 +314,7 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
         crate::protocol::ServerEvent::AvailableModelsUpdated {
             provider_name: None,
             provider_model: None,
+            context_window: None,
             available_models: vec!["old-model".to_string(), "new-model".to_string()],
             available_model_routes: vec![
                 crate::provider::ModelRoute {
@@ -376,6 +473,7 @@ fn test_remote_auth_model_change_does_not_add_a_third_visible_line() {
             id: 91,
             model: "gpt-5.6-sol".to_string(),
             provider_name: Some("OpenAI".to_string()),
+            context_window: None,
             error: None,
         },
         &mut remote,

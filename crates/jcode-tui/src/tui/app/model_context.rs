@@ -627,14 +627,33 @@ impl App {
 
     pub(super) fn update_context_limit_for_model(&mut self, model: &str) {
         let limit = if self.is_remote {
-            crate::provider::context_limit_for_model_with_provider(
-                model,
-                self.remote_provider_name.as_deref(),
-            )
-            .unwrap_or(self.provider.context_window())
+            self.remote_context_window.unwrap_or_else(|| {
+                crate::provider::context_limit_for_model_with_provider(
+                    model,
+                    self.remote_provider_name.as_deref(),
+                )
+                .unwrap_or(self.provider.context_window())
+            })
         } else {
             self.provider.context_window()
         };
+        self.apply_context_limit(limit);
+    }
+
+    pub(super) fn apply_remote_context_window(&mut self, context_window: Option<usize>) -> bool {
+        let Some(limit) = context_window.filter(|limit| *limit > 0) else {
+            return false;
+        };
+        let changed =
+            self.remote_context_window != Some(limit) || self.context_limit != limit as u64;
+        self.remote_context_window = Some(limit);
+        if changed {
+            self.apply_context_limit(limit);
+        }
+        changed
+    }
+
+    fn apply_context_limit(&mut self, limit: usize) {
         self.context_limit = limit as u64;
         self.context_warning_shown = false;
 

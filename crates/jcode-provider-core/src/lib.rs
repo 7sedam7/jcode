@@ -1125,6 +1125,11 @@ pub struct ModelCatalogSnapshot {
     pub provider_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_model: Option<String>,
+    /// Effective context window for `provider_model`, as resolved by the
+    /// provider process. Remote clients must not re-derive this from their own
+    /// static model table because provider catalogs are account-specific.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub available_models: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1141,9 +1146,15 @@ impl ModelCatalogSnapshot {
         Self {
             provider_name,
             provider_model,
+            context_window: None,
             available_models,
             model_routes,
         }
+    }
+
+    pub fn with_context_window(mut self, context_window: Option<usize>) -> Self {
+        self.context_window = context_window;
+        self
     }
 
     pub fn from_provider(provider: &dyn Provider) -> Self {
@@ -1156,6 +1167,7 @@ impl ModelCatalogSnapshot {
             provider.available_models_display(),
             provider.model_routes(),
         )
+        .with_context_window(Some(provider.context_window()))
     }
 
     pub fn has_routes(&self) -> bool {
@@ -1548,6 +1560,10 @@ mod tests {
             }]
         }
 
+        fn context_window(&self) -> usize {
+            1_050_000
+        }
+
         fn fork(&self) -> Arc<dyn Provider> {
             Arc::new(SnapshotTestProvider)
         }
@@ -1559,6 +1575,7 @@ mod tests {
 
         assert_eq!(snapshot.provider_name.as_deref(), Some("snapshot-provider"));
         assert_eq!(snapshot.provider_model.as_deref(), Some("snapshot-model"));
+        assert_eq!(snapshot.context_window, Some(1_050_000));
         assert_eq!(snapshot.available_models, ["snapshot-model"]);
         assert!(snapshot.has_routes());
         assert_eq!(snapshot.model_routes[0].api_method, "snapshot-api");

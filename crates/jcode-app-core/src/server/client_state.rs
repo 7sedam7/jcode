@@ -43,6 +43,7 @@ pub(super) fn compact_available_models_event(event: &ServerEvent) -> Option<Serv
     let ServerEvent::AvailableModelsUpdated {
         provider_name,
         provider_model,
+        context_window,
         available_models,
         available_model_routes,
     } = event
@@ -53,6 +54,7 @@ pub(super) fn compact_available_models_event(event: &ServerEvent) -> Option<Serv
     Some(ServerEvent::AvailableModelsUpdated {
         provider_name: provider_name.clone(),
         provider_model: provider_model.clone(),
+        context_window: *context_window,
         available_models: available_models.clone(),
         available_model_routes: compact_model_routes(available_model_routes.clone()),
     })
@@ -62,6 +64,7 @@ pub(super) fn names_only_available_models_event(event: &ServerEvent) -> Option<S
     let ServerEvent::AvailableModelsUpdated {
         provider_name,
         provider_model,
+        context_window,
         available_models,
         ..
     } = event
@@ -72,6 +75,7 @@ pub(super) fn names_only_available_models_event(event: &ServerEvent) -> Option<S
     Some(ServerEvent::AvailableModelsUpdated {
         provider_name: provider_name.clone(),
         provider_model: provider_model.clone(),
+        context_window: *context_window,
         available_models: available_models.clone(),
         available_model_routes: Vec::new(),
     })
@@ -100,12 +104,14 @@ pub(super) fn model_catalog_event_for_delivery(
 fn model_catalog_fields_for_delivery(
     provider_name: Option<String>,
     provider_model: Option<String>,
+    context_window: Option<usize>,
     available_models: Vec<String>,
     available_model_routes: Vec<crate::provider::ModelRoute>,
 ) -> (Vec<String>, Vec<crate::provider::ModelRoute>) {
     let event = ServerEvent::AvailableModelsUpdated {
         provider_name,
         provider_model,
+        context_window,
         available_models,
         available_model_routes,
     };
@@ -287,6 +293,7 @@ pub(super) async fn handle_get_model_catalog(
     let (
         provider_name,
         provider_model,
+        context_window,
         available_models,
         available_model_routes,
         resolved_credential,
@@ -297,6 +304,7 @@ pub(super) async fn handle_get_model_catalog(
             Ok(agent_guard) => (
                 Some(agent_guard.provider_name()),
                 Some(agent_guard.provider_model()),
+                Some(agent_guard.provider_handle().context_window()),
                 agent_guard.available_models_display(),
                 agent_guard.model_routes(),
                 agent_guard.active_resolved_credential(),
@@ -317,6 +325,7 @@ pub(super) async fn handle_get_model_catalog(
                         .as_ref()
                         .and_then(history_provider_name_from_session),
                     persisted_model,
+                    None,
                     Vec::new(),
                     Vec::new(),
                     None,
@@ -330,6 +339,7 @@ pub(super) async fn handle_get_model_catalog(
     let (available_models, available_model_routes) = model_catalog_fields_for_delivery(
         provider_name.clone(),
         provider_model.clone(),
+        context_window,
         available_models,
         available_model_routes,
     );
@@ -342,6 +352,7 @@ pub(super) async fn handle_get_model_catalog(
         images: Vec::new(),
         provider_name,
         provider_model,
+        context_window,
         available_models,
         available_model_routes,
         mcp_servers: Vec::new(),
@@ -600,6 +611,9 @@ async fn send_history_from_persisted_session(
     // serialized wire bytes simultaneously.
     let provider_name = history_provider_name_from_session(&session);
     let provider_model = session.model.clone();
+    // The busy-agent fallback cannot query the live provider. Older clients
+    // already fall back to their local table when this optional field is absent.
+    let context_window = None;
     let subagent_model = session.subagent_model.clone();
     let autoreview_enabled = session.autoreview_enabled;
     let autojudge_enabled = session.autojudge_enabled;
@@ -630,6 +644,7 @@ async fn send_history_from_persisted_session(
         images,
         provider_name,
         provider_model,
+        context_window,
         subagent_model,
         autoreview_enabled,
         autojudge_enabled,
@@ -690,6 +705,7 @@ pub(super) async fn send_history(
         is_canary,
         provider_name,
         provider_model,
+        context_window,
         subagent_model,
         autoreview_enabled,
         autojudge_enabled,
@@ -752,6 +768,7 @@ pub(super) async fn send_history(
         let skills_ms = skills_start.elapsed().as_millis();
 
         let provider_meta_start = Instant::now();
+        let context_window = Some(provider.context_window());
         let reasoning_effort = provider.reasoning_effort();
         let service_tier = provider.service_tier();
         let provider_meta_ms = provider_meta_start.elapsed().as_millis();
@@ -766,6 +783,7 @@ pub(super) async fn send_history(
             agent_guard.is_canary(),
             agent_guard.provider_name(),
             agent_guard.provider_model(),
+            context_window,
             agent_guard.subagent_model(),
             agent_guard.autoreview_enabled(),
             agent_guard.autojudge_enabled(),
@@ -795,6 +813,7 @@ pub(super) async fn send_history(
     let (available_models, available_model_routes) = model_catalog_fields_for_delivery(
         Some(provider_name.clone()),
         Some(provider_model.clone()),
+        context_window,
         available_models,
         available_model_routes,
     );
@@ -852,6 +871,7 @@ pub(super) async fn send_history(
         images,
         provider_name: Some(provider_name),
         provider_model: Some(provider_model),
+        context_window,
         subagent_model,
         autoreview_enabled,
         autojudge_enabled,
@@ -917,6 +937,7 @@ fn history_catalog_snapshot_key(event: &ServerEvent) -> Option<String> {
     let ServerEvent::History {
         provider_name,
         provider_model,
+        context_window,
         available_models,
         available_model_routes,
         ..
@@ -931,6 +952,7 @@ fn history_catalog_snapshot_key(event: &ServerEvent) -> Option<String> {
         &ServerEvent::AvailableModelsUpdated {
             provider_name: provider_name.clone(),
             provider_model: provider_model.clone(),
+            context_window: *context_window,
             available_models: available_models.clone(),
             available_model_routes: available_model_routes.clone(),
         },

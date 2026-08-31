@@ -40,6 +40,7 @@ impl Agent {
             self.available_models_display(),
             self.model_routes(),
         )
+        .with_context_window(Some(self.provider.context_window()))
     }
 
     pub fn registry(&self) -> Registry {

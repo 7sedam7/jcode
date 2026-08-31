@@ -44,6 +44,10 @@ impl Provider for MockProvider {
         "mock-model".to_string()
     }
 
+    fn context_window(&self) -> usize {
+        1_050_000
+    }
+
     fn available_models_display(&self) -> Vec<String> {
         vec!["gpt-5.6-sol".to_string()]
     }
@@ -315,6 +319,7 @@ async fn handle_get_history_includes_full_model_routes_when_the_catalog_fits() {
         serde_json::from_str(line.trim()).expect("decode history event");
 
     let crate::protocol::ServerEvent::History {
+        context_window,
         available_models,
         available_model_routes,
         ..
@@ -323,6 +328,7 @@ async fn handle_get_history_includes_full_model_routes_when_the_catalog_fits() {
         panic!("expected history event");
     };
     assert_eq!(available_models, ["gpt-5.6-sol"]);
+    assert_eq!(context_window, Some(1_050_000));
     assert_eq!(available_model_routes.len(), 1);
     let route = &available_model_routes[0];
     assert_eq!(route.model, "gpt-5.6-sol");
@@ -335,6 +341,7 @@ async fn handle_get_history_includes_full_model_routes_when_the_catalog_fits() {
         &crate::protocol::ServerEvent::AvailableModelsUpdated {
             provider_name: Some("mock".to_string()),
             provider_model: Some("mock-model".to_string()),
+            context_window: Some(provider.context_window()),
             available_models,
             available_model_routes,
         },

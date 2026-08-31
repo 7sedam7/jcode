@@ -333,6 +333,7 @@ async fn notify_auth_changed_emits_available_models_updated_after_provider_updat
                 provider_model,
                 available_models,
                 available_model_routes,
+                ..
             } => {
                 saw_models = Some((
                     provider_name,
@@ -1366,6 +1367,7 @@ async fn refresh_models_emits_available_models_updated_after_prefetch() {
                 provider_model,
                 available_models,
                 available_model_routes,
+                ..
             } => {
                 saw_models = Some((
                     provider_name,

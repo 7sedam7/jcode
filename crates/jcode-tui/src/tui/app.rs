@@ -1154,6 +1154,9 @@ pub struct App {
     remote_client_instance_id: String,
     remote_provider_name: Option<String>,
     remote_provider_model: Option<String>,
+    /// Effective context window reported by the remote provider process.
+    /// This is authoritative for account-specific catalogs such as Copilot's.
+    remote_context_window: Option<usize>,
     /// Monotonic counter bumped each time the server pushes a fresh remote model
     /// catalog snapshot (`AvailableModelsUpdated`). The onboarding readiness
     /// validation uses this to wait for the post-login catalog refresh to land
