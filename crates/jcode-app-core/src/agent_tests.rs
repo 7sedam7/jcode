@@ -944,6 +944,26 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
 }
 
 #[tokio::test]
+async fn new_agent_does_not_persist_its_initial_context_only_session() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::tempdir().expect("temporary JCODE_HOME");
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let provider: Arc<dyn Provider> = Arc::new(ExplicitPinProvider::new("z-ai/glm-5.2"));
+    let registry = Registry::new(provider.clone()).await;
+    let agent = Agent::new(provider, registry);
+
+    assert!(!crate::session::session_exists(agent.session_id()));
+
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
 async fn explicit_provider_pin_is_persisted_and_reapplied_on_restore() {
     let _guard = crate::storage::lock_test_env();
     let provider = Arc::new(ExplicitPinProvider::new("z-ai/glm-5.2"));

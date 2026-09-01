@@ -91,6 +91,16 @@ fn is_visible_conversation_message(message: &StoredMessage) -> bool {
         && !is_scheduled_task_message(message)
 }
 
+fn is_initial_session_context_message(message: &StoredMessage) -> bool {
+    message.role == Role::User
+        && message.display_role == Some(StoredDisplayRole::System)
+        && message.content.len() == 1
+        && matches!(
+            message.content.first(),
+            Some(ContentBlock::Text { text, .. }) if text.starts_with(SESSION_CONTEXT_PREFIX)
+        )
+}
+
 /// Recognize scheduler prompts persisted before they received an explicit
 /// system display role. This keeps old sessions from treating them as user
 /// prompts after resume.
@@ -901,6 +911,23 @@ impl Session {
                 _ => false,
             })
         })
+    }
+
+    fn has_only_initial_session_context_message(&self) -> bool {
+        self.messages.len() == 1
+            && self
+                .messages
+                .first()
+                .is_some_and(is_initial_session_context_message)
+    }
+
+    /// Treat provider/model values assigned during new-Agent construction as
+    /// part of an otherwise untouched initial panel. Later selections differ
+    /// from this baseline and therefore trigger normal persistence.
+    pub fn mark_initial_context_untouched(&mut self) {
+        if !self.persist_state.snapshot_exists && self.has_only_initial_session_context_message() {
+            self.reset_persist_state(false);
+        }
     }
 
     /// Persist an immutable session-context snapshot as the first provider-visible

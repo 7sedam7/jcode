@@ -381,12 +381,33 @@ impl Session {
         // the user (or a programmatic caller) adds a real conversation message,
         // the normal first snapshot includes all of the accumulated context.
         if !self.persist_state.snapshot_exists
-            && !self
-                .messages
-                .iter()
-                .any(super::is_visible_conversation_message)
+            && self.has_only_initial_session_context_message()
             && !self.saved
             && self.custom_title.is_none()
+            && self.title.is_none()
+            && self.parent_id.is_none()
+            && self.compaction.is_none()
+            && self.provider_session_id.is_none()
+            && self
+                .persist_state
+                .last_meta
+                .as_ref()
+                .is_some_and(|baseline| {
+                    baseline.provider_key == self.provider_key && baseline.model == self.model
+                })
+            && self.route_api_method.is_none()
+            && self.reasoning_effort.is_none()
+            && self.subagent_model.is_none()
+            && self.improve_mode.is_none()
+            && self.autoreview_enabled.is_none()
+            && self.autojudge_enabled.is_none()
+            && !self.is_debug
+            && !self.is_canary
+            && self.testing_build.is_none()
+            && matches!(self.status, super::SessionStatus::Active)
+            && self.save_label.is_none()
+            && self.memory_injections.is_empty()
+            && self.replay_events.is_empty()
         {
             return Ok(());
         }

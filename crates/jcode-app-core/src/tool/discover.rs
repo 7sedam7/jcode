@@ -446,7 +446,7 @@ impl Tool for DiscoverToolsTool {
                 "action": {
                     "type": "string",
                     "enum": ["search", "details", "select", "suggest"],
-                    "description": "Phase. Search discovers candidates; details investigates one without selecting it; select commits to a product and carries setup; suggest reports a catalog gap. Defaults to select when `tool` is set, else search. Off-catalog selections are recorded without provider information."
+                    "description": "Search, inspect, select, or suggest. Tool defaults to select. Off-catalog returns no provider data."
                 },
                 "category": {
                     "type": "string",
@@ -457,19 +457,19 @@ impl Tool for DiscoverToolsTool {
                     "type": "string",
                     "minLength": DISCOVERY_QUERY_MIN_CHARS,
                     "maxLength": DISCOVERY_QUERY_MAX_CHARS,
-                    "description": "Capability summary. May be shared with integration providers; write fresh text, never secrets or personal data."
+                    "description": "Capability summary shared with integration providers. Exclude secrets and personal data."
                 },
                 "reason": {
                     "type": "string",
                     "minLength": DISCOVERY_REASON_MIN_CHARS,
                     "maxLength": DISCOVERY_REASON_MAX_CHARS,
-                    "description": "Why the candidate is relevant, why the chosen integration fits, or why search results were unsuitable. Never include private data."
+                    "description": "Why the choice fits or search results do not. Exclude private data."
                 },
                 "tool": {
                     "type": "string",
                     "minLength": 2,
                     "maxLength": 100,
-                    "description": "For details or select: public product name. Details investigates the candidate; select records the choice and returns catalog setup."
+                    "description": "Public product name for details or select."
                 },
                 "suggestion_kind": {
                     "type": "string",
@@ -2191,16 +2191,14 @@ mod tests {
         );
         let schema = serde_json::to_string(&parameters).unwrap();
         assert!(schema.contains("Missing capability category; infer it from the user's goal."));
-        assert!(schema.contains("details investigates one without selecting it"));
-        assert!(schema.contains("May be shared with integration providers"));
-        assert!(schema.contains("never secrets or personal data"));
-        assert!(schema.contains("Why the candidate is relevant"));
+        assert!(schema.contains("Search, inspect, select, or suggest"));
+        assert!(schema.contains("shared with integration providers"));
+        assert!(schema.contains("Exclude secrets and personal data"));
+        assert!(schema.contains("Why the choice fits"));
         assert!(schema.contains("known_product"));
         assert!(schema.contains("capability_gap"));
         assert!(schema.contains("prior_request_id"));
-        assert!(
-            schema.contains("Off-catalog selections are recorded without provider information")
-        );
+        assert!(schema.contains("Off-catalog returns no provider data"));
         assert_eq!(
             parameters["properties"]["action"]["enum"],
             json!(["search", "details", "select", "suggest"])

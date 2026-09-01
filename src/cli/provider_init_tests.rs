@@ -33,6 +33,7 @@ fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::Openai.as_arg_value(), "openai");
     assert_eq!(ProviderChoice::OpenaiApi.as_arg_value(), "openai-api");
     assert_eq!(ProviderChoice::Openrouter.as_arg_value(), "openrouter");
+    assert_eq!(ProviderChoice::Orcarouter.as_arg_value(), "orcarouter");
     assert_eq!(ProviderChoice::Bedrock.as_arg_value(), "bedrock");
     assert_eq!(ProviderChoice::Azure.as_arg_value(), "azure");
     assert_eq!(ProviderChoice::Opencode.as_arg_value(), "opencode");
@@ -511,6 +512,10 @@ fn choice_for_login_provider_round_trips_openai_compatible_profiles() {
     assert_eq!(
         choice_for_login_provider(provider_catalog::OPENAI_COMPAT_LOGIN_PROVIDER),
         Some(ProviderChoice::OpenaiCompatible)
+    );
+    assert_eq!(
+        choice_for_login_provider(provider_catalog::ORCAROUTER_LOGIN_PROVIDER),
+        Some(ProviderChoice::Orcarouter)
     );
 }
 

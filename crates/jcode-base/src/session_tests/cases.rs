@@ -709,6 +709,11 @@ fn untouched_session_is_not_persisted_until_real_conversation_starts() -> Result
     let id = "session_untouched_lazy_save";
     let mut session = Session::create_with_id(id.to_string(), None, None);
     assert!(session.ensure_initial_session_context_message());
+    // Provider/model identity is populated automatically when an Agent opens a
+    // new panel. It does not make that panel a meaningful persisted session.
+    session.provider_key = Some("copilot".to_string());
+    session.model = Some("gpt-5.6-sol".to_string());
+    session.mark_initial_context_untouched();
     session.save()?;
     assert!(!session_path(id)?.exists());
 
@@ -721,6 +726,32 @@ fn untouched_session_is_not_persisted_until_real_conversation_starts() -> Result
     );
     session.save()?;
     assert!(session_path(id)?.exists());
+    Ok(())
+}
+
+#[test]
+fn hidden_non_context_message_is_persisted() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-session-hidden-message-save-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let id = "session_hidden_non_context_save";
+    let mut session = Session::create_with_id(id.to_string(), None, None);
+    session.add_message_with_display_role(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "<system-reminder>\nsearchable hidden state\n</system-reminder>".to_string(),
+            cache_control: None,
+        }],
+        Some(StoredDisplayRole::System),
+    );
+    session.save()?;
+
+    assert!(session_path(id)?.exists());
+    assert_eq!(Session::load(id)?.messages.len(), 1);
     Ok(())
 }
 

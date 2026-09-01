@@ -103,6 +103,10 @@ fn test_provider_choice_aliases_parse() {
 
     let args = Args::try_parse_from(["jcode", "--provider", "cgc", "run", "smoke"]).unwrap();
     assert_eq!(args.provider, ProviderChoice::Comtegra);
+
+    let args =
+        Args::try_parse_from(["jcode", "--provider", "orca-router", "run", "smoke"]).unwrap();
+    assert_eq!(args.provider, ProviderChoice::Orcarouter);
 }
 
 #[test]

@@ -483,6 +483,7 @@ async fn handle_get_model_catalog_does_not_wait_for_busy_agent_lock() {
         None,
         Some("busy model catalog".to_string()),
     );
+    session.provider_key = Some("mock".to_string());
     session.model = Some("persisted-model".to_string());
     session.save().expect("save session");
 

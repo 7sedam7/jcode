@@ -815,17 +815,17 @@ impl Tool for TodoTool {
                             "feedback_loop_relevance": {
                                 "type": "string",
                                 "enum": ["indirect", "synthetic", "representative", "acceptance_blocked", "acceptance_aligned"],
-                                "description": "How directly checks represent observable acceptance behavior. indirect = inspection or an internal proxy; synthetic = custom harnesses, stubs, mocks, copied sources, or synthetic fixtures; representative = real public interfaces but not the complete acceptance workflow; acceptance_blocked = the real acceptance workflow was attempted but an external constraint prevented a result; acceptance_aligned = the real project build, integration test, or end-user workflow passed. Substitute-only validation is never acceptance_aligned."
+                                "description": "Only real workflows are acceptance_aligned; blocked runs are acceptance_blocked; substitutes are not."
                             },
                             "feedback_loop_coverage": {
                                 "type": "string",
                                 "enum": ["narrow", "main_paths", "edge_and_integration_paths"],
-                                "description": "How broadly the checks exercise main workflows, integration boundaries, edge cases, packaging, and likely failure modes."
+                                "description": "Scope: public interfaces, integration boundaries, edge cases, packaging, and likely failures."
                             },
                             "feedback_loop_traceability": {
                                 "type": "string",
                                 "enum": ["unmapped", "partial", "complete"],
-                                "description": "How completely requirements map to evidence. unmapped = requirements are not tied to checks; partial = only some explicit requirements or changed public outputs have concrete checks and observed results; complete = every explicit requirement and changed public output has a concrete check and observed result. Aggregate test counts alone do not establish complete traceability."
+                                "description": "Requirement-to-evidence mapping: unmapped, partial, or complete. Aggregate counts are insufficient."
                             },
                             "delivery_state": {
                                 "type": "string",
@@ -1053,10 +1053,10 @@ mod tests {
             .as_str()
             .expect("feedback-loop relevance should explain every state");
         for required_concept in [
-            "custom harnesses",
-            "real public interfaces",
-            "external constraint",
-            "Substitute-only validation is never acceptance_aligned",
+            "real workflows",
+            "acceptance_aligned",
+            "acceptance_blocked",
+            "substitutes are not",
         ] {
             assert!(relevance_description.contains(required_concept));
         }
@@ -1092,14 +1092,13 @@ mod tests {
             .expect("alignment score should describe representation coverage");
         assert!(alignment_description.contains("what the user wants"));
         assert!(alignment_description.contains("when guessing"));
-        // The detailed calibration rubric moved out of the always-on schema
-        // into deferred turn-finish continuation messages, which are paid only
-        // when the completed turn needs another quality pass.
+        // The private gate uses a concise deferred reminder rather than adding
+        // its full calibration rubric to every tool-enabled request.
         for required_concept in [
-            "requirement inventory",
-            "outcomes, deliverables, constraints, prohibited actions",
-            "integration paths, edge cases, and necessary follow-through",
-            "Do not ask the user",
+            "[auto]",
+            "Understand the user's intent better",
+            "avoid asking the user",
+            "todo is up to date",
         ] {
             assert!(
                 crate::todo::TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE
@@ -1124,9 +1123,10 @@ mod tests {
             "feedback_loop description omitted per-requirement check coverage: {feedback_description}"
         );
         for required_concept in [
-            "reports back on each requirement",
-            "run tests, verify, or review count only",
-            "non-testable requirements",
+            "[auto]",
+            "feedback loop",
+            "Think about",
+            "todo is up to date",
         ] {
             assert!(
                 crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
@@ -1179,7 +1179,7 @@ mod tests {
             "integration boundaries",
             "edge cases",
             "packaging",
-            "likely failure modes",
+            "likely failures",
         ] {
             assert!(
                 model_visible_schema.contains(required_guidance),

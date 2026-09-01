@@ -393,6 +393,7 @@ impl Agent {
         agent.session.provider_key = agent.provider_key_for_new_session();
         agent.reconcile_explicit_provider_pin_route();
         agent.session.ensure_initial_session_context_message();
+        agent.session.mark_initial_context_untouched();
         agent.seed_compaction_from_session();
         agent.log_env_snapshot("create");
         agent.fire_session_lifecycle_hook("session_start", "create");

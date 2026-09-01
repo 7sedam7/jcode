@@ -299,6 +299,7 @@ fn test_handle_server_event_history_preserves_reasoning_effort_for_same_session_
             images: vec![],
             provider_name: Some("anthropic".to_string()),
             provider_model: Some("claude-opus-4-1".to_string()),
+            context_window: None,
             subagent_model: None,
             autoreview_enabled: None,
             autojudge_enabled: None,

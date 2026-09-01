@@ -169,6 +169,7 @@ impl ScopedEnvVar {
     fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let prev = std::env::var_os(key);
         crate::env::set_var(key, value);
+        crate::config::invalidate_config_cache();
         Self { key, prev }
     }
 }
@@ -180,6 +181,7 @@ impl Drop for ScopedEnvVar {
         } else {
             crate::env::remove_var(self.key);
         }
+        crate::config::invalidate_config_cache();
     }
 }
 
