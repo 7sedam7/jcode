@@ -221,8 +221,13 @@ impl Agent {
         self.provider.active_resolved_credential()
     }
 
-    pub fn set_session_provider_key(&mut self, provider_key: Option<String>) {
+    pub fn set_session_provider_route(
+        &mut self,
+        provider_key: Option<String>,
+        route_api_method: Option<String>,
+    ) {
         self.session.provider_key = provider_key;
+        self.session.route_api_method = route_api_method;
     }
 
     pub fn rename_session_title(&mut self, title: Option<String>) -> Result<String> {

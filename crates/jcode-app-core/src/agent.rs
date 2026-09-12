@@ -303,7 +303,7 @@ impl Agent {
             allowed_tools.clone(),
             disabled_tools.clone(),
         );
-        Self {
+        let agent = Self {
             provider,
             registry,
             skills,
@@ -340,7 +340,9 @@ impl Agent {
             inline_tail: inline_tail::InlineTailBuffer::default(),
             transcript_telemetry_sent: false,
             concurrency_session: None,
-        }
+        };
+        crate::session_provider::record_session_provider(&agent.session.id, &agent.provider);
+        agent
     }
 
     fn current_skills_snapshot(&self) -> Arc<SkillRegistry> {

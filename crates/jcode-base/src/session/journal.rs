@@ -16,6 +16,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) compaction: Option<StoredCompactionState>,
     pub(super) provider_session_id: Option<String>,
     pub(super) provider_key: Option<String>,
+    #[serde(default)]
+    pub(super) route_api_method: Option<String>,
     pub(super) model: Option<String>,
     #[serde(default)]
     pub(super) reasoning_effort: Option<String>,
@@ -78,6 +80,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.title != current.title
         || prev.custom_title != current.custom_title
         || prev.provider_key != current.provider_key
+        || prev.route_api_method != current.route_api_method
         || prev.reasoning_effort != current.reasoning_effort
         || prev.subagent_model != current.subagent_model
         || prev.improve_mode != current.improve_mode

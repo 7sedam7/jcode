@@ -113,6 +113,9 @@ pub(super) async fn maybe_handle_session_admin_command(
         }
 
         let removed_agent = super::remove_session_entry(sessions, target_id).await;
+        if let Some(agent) = removed_agent.as_ref() {
+            super::spawn_provider::forget_agent_session(target_id, agent);
+        }
         remove_session_interrupt_queue(soft_interrupt_queues, target_id).await;
         remove_background_tool_signal(target_id);
         if let Some(ref agent_arc) = removed_agent {

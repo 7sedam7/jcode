@@ -191,6 +191,7 @@ impl Agent {
 
     /// Clear conversation history
     pub fn clear(&mut self) {
+        let previous_session_id = self.session.id.clone();
         let preserve_canary = self.session.is_canary;
         let preserve_testing_build = self.session.testing_build.clone();
         let preserve_debug = self.session.is_debug;
@@ -216,6 +217,11 @@ impl Agent {
             &self.session.id,
             self.allowed_tools.clone(),
             self.disabled_tools.clone(),
+        );
+        crate::session_provider::move_session_provider(
+            &previous_session_id,
+            &self.session.id,
+            &self.provider,
         );
         self.refresh_agents_md_snapshot();
         self.reconcile_explicit_provider_pin_route();
@@ -679,12 +685,18 @@ impl Agent {
         let previous_status = session.status.clone();
 
         let assign_start = Instant::now();
+        let previous_session_id = self.session.id.clone();
         // A failed load must leave the current Agent and its concurrency lease
         // alive. Close it only after the replacement is ready to install.
         self.mark_closed();
         // Restore provider_session_id for Claude CLI session resume
         self.provider_session_id = session.provider_session_id.clone();
         self.session = session;
+        crate::session_provider::move_session_provider(
+            &previous_session_id,
+            &self.session.id,
+            &self.provider,
+        );
         self.refresh_agents_md_snapshot();
         self._tool_policy_registration = crate::tool::register_session_tool_policy(
             &self.session.id,

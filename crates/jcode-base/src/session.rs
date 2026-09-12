@@ -500,7 +500,6 @@ impl Session {
             }
         })
     }
-
     fn journal_meta(&self) -> SessionJournalMeta {
         SessionJournalMeta {
             parent_id: self.parent_id.clone(),
@@ -510,6 +509,7 @@ impl Session {
             compaction: self.compaction.clone(),
             provider_session_id: self.provider_session_id.clone(),
             provider_key: self.provider_key.clone(),
+            route_api_method: self.route_api_method.clone(),
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
             subagent_model: self.subagent_model.clone(),
@@ -702,7 +702,6 @@ impl Session {
             self.persist_state.replay_events_mode = PersistVectorMode::Append;
         }
     }
-
     fn apply_journal_meta(&mut self, meta: SessionJournalMeta) {
         self.parent_id = meta.parent_id;
         self.title = meta.title;
@@ -711,6 +710,7 @@ impl Session {
         self.compaction = meta.compaction;
         self.provider_session_id = meta.provider_session_id;
         self.provider_key = meta.provider_key;
+        self.route_api_method = meta.route_api_method;
         self.model = meta.model;
         self.reasoning_effort = meta.reasoning_effort;
         self.subagent_model = meta.subagent_model;

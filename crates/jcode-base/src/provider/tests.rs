@@ -1145,7 +1145,7 @@ include!("tests/model_resolution.rs");
 include!("tests/issue_534_profile_preservation.rs");
 include!("tests/fallback_failover.rs");
 include!("tests/catalog_subscription.rs");
-
+include!("tests/copilot_fork.rs");
 /// Rendering the route catalog must never schedule network work.
 ///
 /// Regression guard for the "spawning a session refetches every provider

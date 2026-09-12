@@ -236,14 +236,6 @@ fn has_credentials_returns_bool() {
     let _ = CopilotApiProvider::has_credentials();
 }
 
-#[test]
-fn fork_preserves_fetched_models() {
-    let fetched = vec!["model-a".to_string(), "model-b".to_string()];
-    let provider = make_test_provider(fetched.clone());
-    let forked = provider.fork();
-    assert_eq!(forked.available_models_display(), fetched);
-}
-
 fn make_msg(role: Role, blocks: Vec<ContentBlock>) -> ChatMessage {
     ChatMessage {
         role,

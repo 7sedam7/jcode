@@ -2827,7 +2827,6 @@ impl Provider for MultiProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         let current_model = self.model();
         let active = self.active_provider();
-
         let claude = if matches!(active, ActiveProvider::Claude) && self.claude_provider().is_some()
         {
             external::instantiate_expected_external_provider(external::CLAUDE_CLI_RUNTIME)
@@ -2848,7 +2847,8 @@ impl Provider for MultiProvider {
             .copilot_api
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
+            .as_ref()
+            .map(|provider| provider.fork());
         let antigravity_provider = self
             .antigravity
             .read()

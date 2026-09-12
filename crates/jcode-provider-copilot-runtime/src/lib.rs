@@ -1066,9 +1066,16 @@ impl Provider for CopilotApiProvider {
             machine_id: self.machine_id.clone(),
             init_ready: self.init_ready.clone(),
             init_done: self.init_done.clone(),
-            premium_mode: self.premium_mode.clone(),
-            user_turn_count: self.user_turn_count.clone(),
-            reasoning_effort: self.reasoning_effort.clone(),
+            // These are per-session controls. Sharing them lets a worker's
+            // effort or first-turn accounting mutate its coordinator.
+            premium_mode: Arc::new(std::sync::atomic::AtomicU8::new(
+                self.premium_mode.load(std::sync::atomic::Ordering::Relaxed),
+            )),
+            user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(
+                self.user_turn_count
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )),
+            reasoning_effort: Arc::new(RwLock::new(self.current_reasoning_effort())),
             // The fork owns its model slot, so it owns its selection state too:
             // sharing the flag would let a fork's model change unpin the parent.
             model_explicitly_selected: Arc::new(std::sync::atomic::AtomicBool::new(
@@ -1128,3 +1135,7 @@ impl Provider for CopilotApiProvider {
 #[cfg(test)]
 #[path = "copilot_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "fork_tests.rs"]
+mod fork_tests;

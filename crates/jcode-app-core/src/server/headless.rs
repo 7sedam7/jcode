@@ -106,8 +106,11 @@ pub(super) async fn create_headless_session(
     ) {
         new_agent.set_inline_output_tap(true);
     }
-    if provider_key_override.is_some() {
-        new_agent.set_session_provider_key(provider_key_override.clone());
+    if provider_key_override.is_some() || route_api_method_override.is_some() {
+        new_agent.set_session_provider_route(
+            provider_key_override.clone(),
+            route_api_method_override.clone(),
+        );
     }
     let client_session_id = new_agent.session_id().to_string();
 

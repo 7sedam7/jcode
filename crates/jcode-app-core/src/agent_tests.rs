@@ -843,7 +843,6 @@ async fn new_agent_registers_active_pid_and_clear_swaps_it() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
-
     let first_session_id = agent.session_id().to_string();
     assert!(
         crate::session::active_session_ids().contains(&first_session_id),
@@ -851,8 +850,9 @@ async fn new_agent_registers_active_pid_and_clear_swaps_it() {
     );
 
     agent.clear();
-
     let second_session_id = agent.session_id().to_string();
+    assert!(crate::session_provider::session_provider(&first_session_id).is_none());
+    assert!(crate::session_provider::session_provider(&second_session_id).is_some());
     let active = crate::session::active_session_ids();
     assert_ne!(first_session_id, second_session_id);
     assert!(

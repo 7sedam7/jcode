@@ -36,3 +36,5 @@ impl Drop for EnvVarGuard {
 
 #[path = "cases.rs"]
 mod cases;
+#[path = "journal_route.rs"]
+mod journal_route;
