@@ -79,12 +79,18 @@ struct ModelPickerFavoritesStore {
 }
 
 fn model_picker_usage_path() -> Option<std::path::PathBuf> {
+    if crate::tui::is_ssh_remote() {
+        return None;
+    }
     crate::storage::app_config_dir()
         .ok()
         .map(|dir| dir.join(MODEL_PICKER_USAGE_FILE))
 }
 
 fn model_picker_favorites_path() -> Option<std::path::PathBuf> {
+    if crate::tui::is_ssh_remote() {
+        return None;
+    }
     crate::storage::app_config_dir()
         .ok()
         .map(|dir| dir.join(MODEL_PICKER_FAVORITES_FILE))
@@ -317,6 +323,9 @@ fn key_char_eq_ignore_ascii_case(code: KeyCode, expected: char) -> bool {
 }
 
 fn remote_model_catalog_cache_path() -> Option<std::path::PathBuf> {
+    if crate::tui::is_ssh_remote() {
+        return None;
+    }
     crate::storage::app_config_dir()
         .ok()
         .map(|dir| dir.join(REMOTE_MODEL_CATALOG_CACHE_FILE))
@@ -746,7 +755,9 @@ impl App {
         remote_available_entries: &[String],
         routes: &mut Vec<crate::provider::ModelRoute>,
     ) {
-        if remote_available_entries.is_empty() {
+        if crate::tui::is_ssh_remote() || remote_available_entries.is_empty() {
+            // The SSH daemon's routes are authoritative. Never infer routes
+            // from this computer's credentials, profiles, or model caches.
             return;
         }
         let mut methods_by_model: std::collections::HashMap<&str, HashSet<&str>> =
@@ -814,7 +825,7 @@ impl App {
     }
 
     pub(super) fn persist_remote_model_catalog_cache(&self) {
-        if !self.is_remote {
+        if crate::tui::is_ssh_remote() || !self.is_remote {
             return;
         }
         if self.remote_model_options.is_empty() {
@@ -871,7 +882,7 @@ impl App {
     }
 
     fn hydrate_remote_model_catalog_cache(&mut self) -> bool {
-        if !self.is_remote || !self.remote_model_options.is_empty() {
+        if crate::tui::is_ssh_remote() || !self.is_remote || !self.remote_model_options.is_empty() {
             return false;
         }
 
@@ -1117,7 +1128,13 @@ impl App {
             return;
         }
 
-        let config = crate::config::config();
+        // UI preferences may be local, but provider defaults must not be.
+        let remote_defaults = crate::config::Config::default();
+        let config = if crate::tui::is_ssh_remote() {
+            &remote_defaults
+        } else {
+            crate::config::config()
+        };
         let config_default_model = config.provider.default_model.clone();
         let config_default_provider = config.provider.default_provider.clone();
 
@@ -1189,7 +1206,9 @@ impl App {
             // Large catalogs still load in the background to keep first paint
             // responsive, but both paths deliberately preserve neutrality.
             const SYNC_REMOTE_FALLBACK_MAX_MODELS: usize = 64;
-            if self.remote_available_entries.len() <= SYNC_REMOTE_FALLBACK_MAX_MODELS {
+            if crate::tui::is_ssh_remote() {
+                self.build_remote_model_routes_lightweight_fallback(&current_model)
+            } else if self.remote_available_entries.len() <= SYNC_REMOTE_FALLBACK_MAX_MODELS {
                 self.build_remote_model_routes_fallback()
             } else {
                 let routes = self.build_remote_model_routes_lightweight_fallback(&current_model);
@@ -1353,7 +1372,13 @@ impl App {
         } else {
             self.provider.model().to_string()
         };
-        let config = crate::config::config();
+        // UI preferences may be local, but provider defaults must not be.
+        let remote_defaults = crate::config::Config::default();
+        let config = if crate::tui::is_ssh_remote() {
+            &remote_defaults
+        } else {
+            crate::config::config()
+        };
         let config_default_model = config.provider.default_model.clone();
         let config_default_provider = config.provider.default_provider.clone();
         let current_effort = if self.is_remote {
@@ -1428,7 +1453,13 @@ impl App {
             self.provider.display_name()
         };
         let current_api_method = self.current_route_api_method();
-        let config = crate::config::config();
+        // UI preferences may be local, but provider defaults must not be.
+        let remote_defaults = crate::config::Config::default();
+        let config = if crate::tui::is_ssh_remote() {
+            &remote_defaults
+        } else {
+            crate::config::config()
+        };
         let config_default_model = config.provider.default_model.clone();
         let config_default_provider = config.provider.default_provider.clone();
         let config_anthropic_effort = config.provider.anthropic_reasoning_effort.clone();
@@ -1956,7 +1987,13 @@ impl App {
         } else {
             self.provider.model().to_string()
         };
-        let config = crate::config::config();
+        // UI preferences may be local, but provider defaults must not be.
+        let remote_defaults = crate::config::Config::default();
+        let config = if crate::tui::is_ssh_remote() {
+            &remote_defaults
+        } else {
+            crate::config::config()
+        };
         let config_default_model = config.provider.default_model.clone();
         let config_default_provider = config.provider.default_provider.clone();
         let current_effort = if self.is_remote {
@@ -2086,6 +2123,11 @@ impl App {
     }
 
     pub(super) fn build_remote_model_routes_fallback(&self) -> Vec<crate::provider::ModelRoute> {
+        if crate::tui::is_ssh_remote() {
+            return self.build_remote_model_routes_lightweight_fallback(
+                self.remote_provider_model.as_deref().unwrap_or("unknown"),
+            );
+        }
         crate::provider::remote_model_routes_fallback(
             self.remote_provider_name.as_deref(),
             &self.remote_available_entries,
@@ -2278,6 +2320,9 @@ impl App {
     }
 
     fn handle_account_picker_selection(&mut self, action: AccountPickerAction) {
+        if super::commands_dispatch::ssh_local_action_blocked(self, "Local account selection") {
+            return;
+        }
         match action {
             AccountPickerAction::Switch { provider_id, label } => {
                 if self.is_remote {
@@ -2333,6 +2378,9 @@ impl App {
     }
 
     pub(super) fn open_session_picker(&mut self) {
+        if super::commands_dispatch::ssh_local_action_blocked(self, "Local session picker") {
+            return;
+        }
         let current_dir = self.session.working_dir.clone();
         let (mut picker, status) = if let Some((server_groups, orphan_sessions)) =
             session_picker::load_cached_sessions_grouped()
@@ -2357,6 +2405,9 @@ impl App {
     /// which are ready for input. Reached via Left arrow on an empty input
     /// (when `display.active_sessions_manager` is enabled) or `/active`.
     pub(super) fn open_active_sessions_picker(&mut self) {
+        if super::commands_dispatch::ssh_local_action_blocked(self, "Local active-session picker") {
+            return;
+        }
         let current_dir = self.session.working_dir.clone();
         let (mut picker, status) = if let Some((server_groups, orphan_sessions)) =
             session_picker::load_cached_sessions_grouped()
@@ -2548,6 +2599,9 @@ impl App {
     }
 
     pub(super) fn open_catchup_picker(&mut self) {
+        if super::commands_dispatch::ssh_local_action_blocked(self, "Local catch-up picker") {
+            return;
+        }
         let current_session_id = super::commands::active_session_id(self);
         if catchup_candidates(&current_session_id).is_empty() {
             self.push_display_message(DisplayMessage::system(
@@ -2580,6 +2634,12 @@ impl App {
     }
 
     pub(super) fn handle_session_picker_selection(&mut self, targets: &[ResumeTarget]) {
+        if super::commands_dispatch::ssh_local_action_blocked(
+            self,
+            "Opening local session terminals",
+        ) {
+            return;
+        }
         if targets.is_empty() {
             return;
         }
@@ -2741,6 +2801,9 @@ impl App {
         &mut self,
         targets: &[ResumeTarget],
     ) {
+        if super::commands_dispatch::ssh_local_action_blocked(self, "Importing local sessions") {
+            return;
+        }
         let Some(target) = targets.first() else {
             return;
         };
@@ -2815,6 +2878,9 @@ impl App {
     }
 
     fn handle_live_claude_takeover(&mut self, target: &ResumeTarget) -> bool {
+        if super::commands_dispatch::ssh_local_action_blocked(self, "Local Claude takeover") {
+            return false;
+        }
         let ResumeTarget::ClaudeCodeSession { session_id, .. } = target else {
             self.push_display_message(DisplayMessage::error(
                 "Live takeover is only available for Claude Code sessions.",
@@ -2852,6 +2918,9 @@ impl App {
     }
 
     pub(super) fn handle_batch_crash_restore(&mut self, session_ids: &[String]) {
+        if super::commands_dispatch::ssh_local_action_blocked(self, "Local session recovery") {
+            return;
+        }
         let recovered = match crate::session::recover_crashed_sessions_by_ids(session_ids) {
             Ok(ids) => ids,
             Err(e) => {
@@ -2940,6 +3009,10 @@ impl App {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Result<()> {
+        if super::commands_dispatch::ssh_local_action_blocked(self, "Local session picker") {
+            self.session_picker_overlay = None;
+            return Ok(());
+        }
         let action = {
             let Some(picker_cell) = self.session_picker_overlay.as_ref() else {
                 return Ok(());
@@ -3039,6 +3112,9 @@ impl App {
     }
 
     fn toggle_selected_model_favorite(&mut self) {
+        if super::commands_dispatch::ssh_local_action_blocked(self, "Saving model favorites") {
+            return;
+        }
         let Some((entry_name, is_favorite, store)) = (|| {
             let picker = self.inline_interactive_state.as_mut()?;
             if !picker_is_runtime_model_picker(picker) || picker.filtered.is_empty() {
@@ -3287,6 +3363,12 @@ impl App {
             code if modifiers.contains(KeyModifiers::CONTROL)
                 && key_char_eq_ignore_ascii_case(code, 'o') =>
             {
+                if super::commands_dispatch::ssh_local_action_blocked(
+                    self,
+                    "Saving a default model",
+                ) {
+                    return Ok(());
+                }
                 if let Some(ref picker) = self.inline_interactive_state {
                     if !picker_is_runtime_model_picker(picker) {
                         return Ok(());
@@ -3387,6 +3469,23 @@ impl App {
                 let idx = picker.filtered[picker.selected];
                 let entry = picker.entries[idx].clone();
 
+                if crate::tui::is_ssh_remote()
+                    && !matches!(
+                        entry.action,
+                        PickerAction::Model
+                            | PickerAction::Usage { .. }
+                            | PickerAction::RemoteLogin { .. }
+                            | PickerAction::RemoteImportDecision { .. }
+                    )
+                {
+                    self.inline_interactive_state = None;
+                    super::commands_dispatch::ssh_local_action_blocked(
+                        self,
+                        "Local account or agent-model picker",
+                    );
+                    return Ok(());
+                }
+
                 if matches!(entry.action, PickerAction::Model) {
                     if picker.column == 0 && entry.options.len() > 1 {
                         picker.column = 1;
@@ -3419,6 +3518,13 @@ impl App {
                     PickerAction::Login(provider) => {
                         self.inline_interactive_state = None;
                         self.start_login_provider(provider);
+                    }
+                    PickerAction::RemoteLogin { provider, import } => {
+                        self.inline_interactive_state = None;
+                        self.select_ssh_login_action(provider, import);
+                    }
+                    PickerAction::RemoteImportDecision { accept } => {
+                        self.select_ssh_import_decision(accept);
                     }
                     PickerAction::Logout(provider) => {
                         self.inline_interactive_state = None;
@@ -3784,6 +3890,56 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ssh_model_picker_uses_wire_catalog_without_local_cache() {
+        if crate::tui::app::commands_dispatch::ssh_test_runs_in_child(
+            "ssh_model_picker_uses_wire_catalog_without_local_cache",
+        ) {
+            return;
+        }
+        assert!(super::model_picker_usage_path().is_none());
+        assert!(super::model_picker_favorites_path().is_none());
+        assert!(super::remote_model_catalog_cache_path().is_none());
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.is_remote = true;
+        app.remote_startup_phase = None;
+        app.remote_provider_name = Some("remote-provider".to_string());
+        app.remote_provider_model = Some("remote-test-model".to_string());
+        app.remote_available_entries = vec!["remote-test-model".to_string()];
+        assert!(!app.hydrate_remote_model_catalog_cache());
+        let routes = app.build_remote_model_routes_fallback();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].model, "remote-test-model");
+        assert_eq!(routes[0].api_method, "remote-catalog");
+        app.open_model_picker();
+        assert!(app.inline_interactive_state.is_some());
+        assert!(app.pending_model_picker_load.is_none());
+        app.persist_remote_model_catalog_cache();
+        app.handle_inline_interactive_key(
+            KeyCode::Char('o'),
+            crossterm::event::KeyModifiers::CONTROL,
+        )
+        .unwrap();
+        assert!(
+            app.display_messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Saving a default model")
+        );
+        // A names-only placeholder cannot stage a switch until its real route arrives.
+        for _ in 0..3 {
+            if app.inline_interactive_state.is_some() {
+                app.handle_inline_interactive_key(
+                    KeyCode::Enter,
+                    crossterm::event::KeyModifiers::NONE,
+                )
+                .unwrap();
+            }
+        }
+        assert!(app.pending_model_switch.is_none());
+    }
+
     use super::{
         REMOTE_MODEL_CATALOG_CACHE_MAX_AGE_SECS, REMOTE_MODEL_CATALOG_CACHE_VERSION,
         REMOTE_MODEL_CATALOG_MAX_DETAIL_BYTES, RemoteModelCatalogCache,

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 const RELOAD_HANDOFF_EVENT_POLL_MS: i32 = 100;
 
 pub fn reload_marker_path() -> PathBuf {
@@ -60,7 +60,7 @@ pub fn recent_reload_state(max_age: Duration) -> Option<ReloadState> {
     let Ok(elapsed) = modified.elapsed() else {
         return Some(state);
     };
-    if elapsed <= max_age {
+    if elapsed < max_age {
         Some(state)
     } else {
         let _ = std::fs::remove_file(&path);

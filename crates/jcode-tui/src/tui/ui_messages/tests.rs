@@ -1363,8 +1363,12 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
     assert!(rendered.contains("✓ todo"), "{rendered}");
     assert!(rendered.contains("pelican-bike"), "{rendered}");
     assert!(
-        compact.contains(&without_whitespace(OBJECTIVE)),
-        "batched todo plan intention was truncated:\n{rendered}"
+        rendered.contains("Intent clear: Deliver a single-page"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains('…'),
+        "long inline intent should be ellipsized: {rendered}"
     );
     // Compact transcript cards show the goal's quality assessments rather than
     // repeating its potentially long feedback-loop prose. The full prose remains

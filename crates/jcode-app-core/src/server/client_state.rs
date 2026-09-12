@@ -199,7 +199,8 @@ pub(super) async fn handle_get_state(
             id,
             session_id: client_session_id.to_string(),
             message_count: session_count,
-            is_processing: client_is_processing,
+            is_processing: client_is_processing
+                || crate::turn_cancel_registry::has_active_turn(client_session_id),
         },
     )
     .await
@@ -297,6 +298,8 @@ pub(super) async fn handle_get_model_catalog(
         available_models,
         available_model_routes,
         resolved_credential,
+        service_tier,
+        reasoning_effort,
         source,
         publish_current_catalog,
     ) = {
@@ -308,6 +311,8 @@ pub(super) async fn handle_get_model_catalog(
                 agent_guard.available_models_display(),
                 agent_guard.model_routes(),
                 agent_guard.active_resolved_credential(),
+                agent_guard.provider_handle().service_tier(),
+                agent_guard.provider_handle().reasoning_effort(),
                 "live",
                 false,
             ),
@@ -320,6 +325,9 @@ pub(super) async fn handle_get_model_catalog(
                     .or_else(|_| Session::load_startup_stub(session_id))
                     .ok();
                 let persisted_model = persisted.as_ref().and_then(|session| session.model.clone());
+                let reasoning_effort = persisted
+                    .as_ref()
+                    .and_then(|session| session.reasoning_effort.clone());
                 (
                     persisted
                         .as_ref()
@@ -329,6 +337,8 @@ pub(super) async fn handle_get_model_catalog(
                     Vec::new(),
                     Vec::new(),
                     None,
+                    None,
+                    reasoning_effort,
                     "fallback",
                     true,
                 )
@@ -372,8 +382,10 @@ pub(super) async fn handle_get_model_catalog(
         status_detail: None,
         upstream_provider: None,
         resolved_credential,
-        reasoning_effort: None,
-        service_tier: None,
+        reasoning_effort,
+        // Catalog replies still use History, so the TUI applies this field as
+        // authoritative. Omitting it falsely turns off /fast status and its badge.
+        service_tier,
         subagent_model: None,
         autoreview_enabled: None,
         autojudge_enabled: None,
@@ -668,6 +680,8 @@ async fn send_history_from_persisted_session(
         upstream_provider: None,
         resolved_credential: None,
         reasoning_effort,
+        // Service tier is live-only provider state. Do not borrow it from a
+        // provisional/template provider while the owning session is busy.
         service_tier: None,
         compaction_mode: crate::config::config().compaction.mode.clone(),
         activity,
@@ -993,10 +1007,12 @@ pub(super) async fn session_activity_snapshot(
     };
 
     snapshot.or_else(|| {
-        fallback_processing.then_some(SessionActivitySnapshot {
-            is_processing: true,
-            current_tool_name: None,
-        })
+        (fallback_processing || crate::turn_cancel_registry::has_active_turn(session_id)).then_some(
+            SessionActivitySnapshot {
+                is_processing: true,
+                current_tool_name: None,
+            },
+        )
     })
 }
 

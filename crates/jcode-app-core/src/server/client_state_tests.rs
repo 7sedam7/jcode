@@ -16,7 +16,7 @@ use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
-struct MockProvider;
+struct MockProvider(Option<&'static str>);
 
 #[async_trait]
 impl Provider for MockProvider {
@@ -37,7 +37,7 @@ impl Provider for MockProvider {
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(Self)
+        Arc::new(Self(self.0))
     }
 
     fn model(&self) -> String {
@@ -61,6 +61,14 @@ impl Provider for MockProvider {
             detail: "optional route detail".repeat(32),
             cheapness: None,
         }]
+    }
+
+    fn service_tier(&self) -> Option<String> {
+        self.0.map(str::to_string)
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        Some("high".to_string())
     }
 }
 
@@ -267,7 +275,7 @@ async fn session_activity_snapshot_uses_fallback_when_no_live_connection_is_mark
 
 #[tokio::test]
 async fn handle_get_history_includes_full_model_routes_when_the_catalog_fits() {
-    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider(None));
     let session_id = "session_history_compact_routes";
     let session = crate::session::Session::create_with_id(
         session_id.to_string(),
@@ -370,6 +378,7 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
         Some("busy fallback".to_string()),
     );
     session.model = Some("mock-model".to_string());
+    session.reasoning_effort = Some("medium".to_string());
     session.append_stored_message(crate::session::StoredMessage {
         id: "msg-busy-fallback".to_string(),
         role: crate::message::Role::User,
@@ -384,7 +393,7 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
     });
     session.save().expect("save session");
 
-    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider(None));
     let registry = Registry::empty();
     let mut live_session = session.clone();
     live_session.title = Some("live agent".to_string());
@@ -445,12 +454,16 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
             activity,
             available_models,
             available_model_routes,
+            service_tier,
+            reasoning_effort,
             ..
         } => {
             assert_eq!(id, 42);
             assert_eq!(returned_session_id, session_id);
             assert_eq!(messages.len(), 1);
             assert_eq!(messages[0].content, "persisted fallback history");
+            assert_eq!(service_tier, None);
+            assert_eq!(reasoning_effort.as_deref(), Some("medium"));
             let activity = activity.expect("fallback activity snapshot");
             assert!(activity.is_processing);
             assert!(available_models.is_empty());
@@ -485,9 +498,10 @@ async fn handle_get_model_catalog_does_not_wait_for_busy_agent_lock() {
     );
     session.provider_key = Some("mock".to_string());
     session.model = Some("persisted-model".to_string());
+    session.reasoning_effort = Some("medium".to_string());
     session.save().expect("save session");
 
-    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider(Some("priority")));
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider.clone(),
         Registry::empty(),
@@ -533,15 +547,82 @@ async fn handle_get_model_catalog_does_not_wait_for_busy_agent_lock() {
             session_id: returned_session_id,
             provider_name,
             provider_model,
+            available_models,
+            available_model_routes,
+            service_tier,
+            reasoning_effort,
             ..
         } => {
             assert_eq!(id, 43);
             assert_eq!(returned_session_id, session_id);
             assert_eq!(provider_name.as_deref(), Some("mock"));
             assert_eq!(provider_model.as_deref(), Some("persisted-model"));
+            assert!(available_models.is_empty());
+            assert!(available_model_routes.is_empty());
+            assert_eq!(service_tier, None);
+            assert_eq!(reasoning_effort.as_deref(), Some("medium"));
         }
         other => panic!("expected history event, got {:?}", other),
     }
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn handle_get_model_catalog_preserves_live_service_tier_and_reasoning_effort() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("create temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let session_id = "session_live_model_catalog";
+    let session = crate::session::Session::create_with_id(
+        session_id.to_string(),
+        None,
+        Some("live model catalog".to_string()),
+    );
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider(Some("priority")));
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider,
+        Registry::empty(),
+        session,
+        None,
+    )));
+    let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let (_reader_a, writer_a) = stream_a.into_split();
+    let writer = Arc::new(Mutex::new(writer_a));
+
+    handle_get_model_catalog(44, session_id, &agent, &writer)
+        .await
+        .expect("live model catalog should be written");
+    drop(writer);
+
+    let mut bytes = Vec::new();
+    stream_b.read_to_end(&mut bytes).await.expect("read event");
+    let event: crate::protocol::ServerEvent =
+        serde_json::from_slice(&bytes).expect("decode model catalog event");
+    let crate::protocol::ServerEvent::History {
+        provider_model,
+        context_window,
+        available_models,
+        available_model_routes,
+        service_tier,
+        reasoning_effort,
+        ..
+    } = event
+    else {
+        panic!("expected history event");
+    };
+    assert_eq!(provider_model.as_deref(), Some("mock-model"));
+    assert_eq!(context_window, Some(1_050_000));
+    assert_eq!(available_models, ["gpt-5.6-sol"]);
+    assert_eq!(available_model_routes.len(), 1);
+    assert_eq!(service_tier.as_deref(), Some("priority"));
+    assert_eq!(reasoning_effort.as_deref(), Some("high"));
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);

@@ -592,6 +592,13 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("gpt-oss-120b");
             push("zai-glm-4.7");
         }
+        // Keep coding models selectable while Novita's live catalog refreshes.
+        "novita" => {
+            push("zai-org/glm-5.3");
+            push("zai-org/glm-5.3-flash");
+            push("moonshotai/kimi-k3");
+            push("deepseek/deepseek-v4-pro-0813");
+        }
         // Belvedir's router accepts `auto`, but does not expose `/models` at
         // its OpenAI-compatible inference base.
         "belvedir" => push("auto"),
@@ -666,7 +673,6 @@ pub fn openai_compatible_profile_static_context_limits(
 pub fn openai_compatible_profile_context_limit(profile_id: &str, model: &str) -> Option<usize> {
     let profile_id = profile_id.trim().to_ascii_lowercase();
     let model = model.trim().to_ascii_lowercase();
-
     match profile_id.as_str() {
         // The selected upstream model may vary. Use Jcode's conservative
         // compatible-provider context budget for the Belvedir auto router.
@@ -678,9 +684,10 @@ pub fn openai_compatible_profile_context_limit(profile_id: &str, model: &str) ->
         // Fall back to the shared open-weight family classifier. Many bundled
         // OpenAI-compatible gateways (Z.AI/GLM, Moonshot/Kimi, MiniMax, Qwen,
         // etc.) serve `/v1/models` entries without a `context_length`, so this
-        // static table is the only reliable source before a live catalog (or an
-        // explicit user `context_window` override) is available.
-        _ => jcode_provider_core::models::open_weight_family_context_limit(&model),
+        // static table is the reliable source before live catalog metadata.
+        // Live metadata wins; keep Conifer's broad static catalog usable offline.
+        _ => jcode_provider_core::models::open_weight_family_context_limit(&model)
+            .or((profile_id == "conifer").then_some(128_000)),
     }
 }
 

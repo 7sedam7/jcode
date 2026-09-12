@@ -224,12 +224,12 @@ fn full_and_fast_auth_status_document_cursor_cli_exception() {
     let (full, _) = build_auth_status_uncached(AuthProbeMode::Full);
     let (fast, _) = build_auth_status_uncached(AuthProbeMode::Fast);
 
-    assert_eq!(full.cursor, AuthState::Available);
+    assert_eq!(full.cursor, AuthState::NotConfigured);
     assert_eq!(fast.cursor, AuthState::NotConfigured);
     assert_eq!(
         full.cursor,
-        AuthState::Available,
-        "Full auth probes cursor-agent status; fast auth intentionally skips CLI/vscdb probes"
+        AuthState::NotConfigured,
+        "Cursor auth status requires native credentials and must not trust cursor-agent sessions"
     );
 
     for (key, value) in saved {
@@ -750,7 +750,7 @@ fn cursor_status_is_available_for_native_auth_without_cli() {
 
 #[cfg(unix)]
 #[test]
-fn cursor_status_is_available_for_authenticated_cli_session() {
+fn cursor_status_ignores_authenticated_cli_session_without_native_credentials() {
     let _lock = crate::storage::lock_test_env();
     let prev_api_key = std::env::var_os("CURSOR_API_KEY");
     let prev_cli_path = std::env::var_os("JCODE_CURSOR_CLI_PATH");
@@ -765,7 +765,7 @@ fn cursor_status_is_available_for_authenticated_cli_session() {
     AuthStatus::invalidate_cache();
 
     let status = AuthStatus::check();
-    assert_eq!(status.cursor, AuthState::Available);
+    assert_eq!(status.cursor, AuthState::NotConfigured);
 
     restore_env_var("CURSOR_API_KEY", prev_api_key);
     restore_env_var("JCODE_CURSOR_CLI_PATH", prev_cli_path);

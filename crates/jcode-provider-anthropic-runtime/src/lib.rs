@@ -413,7 +413,7 @@ async fn ensure_oauth_preflight(
             rate_limit_tier: "default_claude_ai".to_string(),
             first_token_time: 1_740_976_801_491,
             email: email_address,
-            app_version: "2.1.123".to_string(),
+            app_version: "2.1.257".to_string(),
         },
         forced_variations: Default::default(),
         forced_features: Vec::new(),
@@ -2283,9 +2283,7 @@ fn anthropic_model_quality_rank(model: &str) -> usize {
         .unwrap_or(jcode_provider_core::ALL_CLAUDE_MODELS.len())
 }
 
-/// Parse a server-recommended replacement model from a 404 body, e.g.
-/// "Claude Fable 5 is not available. Please use Opus 4.8." -> the catalog id
-/// `claude-opus-4-8`. Returns the best matching known catalog id, if any.
+/// Parse a server-recommended replacement model from a 404 body.
 /// `error_str` is expected to already be lowercased.
 fn anthropic_recommended_model_from_error(error_str: &str) -> Option<String> {
     // Look for the phrase after "please use" / "use " and try to match it against
@@ -2296,12 +2294,17 @@ fn anthropic_recommended_model_from_error(error_str: &str) -> Option<String> {
         .split("please use")
         .nth(1)
         .or_else(|| error_str.split("use ").nth(1))?;
-    // Take up to the next sentence boundary.
-    let hint = hint.split(['.', '!', '\n']).next().unwrap_or(hint).trim();
+    // Split sentence punctuation followed by whitespace, preserving "Opus 4.8".
+    let hint = hint
+        .split_once(". ")
+        .map_or(hint, |(sentence, _)| sentence)
+        .split(['!', '\n'])
+        .next()
+        .unwrap_or(hint)
+        .trim();
     if hint.is_empty() {
         return None;
     }
-    // Reduce the hint to alphanumeric tokens (e.g. "opus", "4", "8").
     let hint_tokens: Vec<String> = hint
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|t| !t.is_empty())
@@ -2310,14 +2313,11 @@ fn anthropic_recommended_model_from_error(error_str: &str) -> Option<String> {
     if hint_tokens.is_empty() {
         return None;
     }
-    // Score each known catalog model by how many hint tokens it contains.
     jcode_base::provider::known_anthropic_model_ids()
         .into_iter()
         .filter(|candidate| !anthropic_model_is_retired(candidate))
         .map(|candidate| {
             let key = AnthropicProvider::normalized_model_key(&candidate);
-            // The catalog id uses hyphenated digits ("claude-opus-4-8"), so the
-            // hint tokens ["opus","4","8"] should all appear.
             let score = hint_tokens
                 .iter()
                 .filter(|token| key.contains(token.as_str()))

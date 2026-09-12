@@ -663,6 +663,7 @@ fn test_subagent_command_suggestions_include_manual_launch_and_model_policy() {
 
 fn configure_test_remote_models_with_copilot(app: &mut App) {
     app.is_remote = true;
+    app.remote_provider_name = Some("GitHub Copilot".to_string());
     app.remote_provider_model = Some("claude-sonnet-4".to_string());
     app.remote_available_entries = vec![
         "claude-sonnet-4-6".to_string(),
@@ -671,6 +672,19 @@ fn configure_test_remote_models_with_copilot(app: &mut App) {
         "gemini-3-pro-preview".to_string(),
         "grok-code-fast-1".to_string(),
     ];
+    app.remote_model_options = app
+        .remote_available_entries
+        .iter()
+        .cloned()
+        .map(|model| crate::provider::ModelRoute {
+            model,
+            provider: "GitHub Copilot".to_string(),
+            api_method: "copilot".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        })
+        .collect();
 }
 
 fn configure_test_remote_models_with_cursor(app: &mut App) {

@@ -25,6 +25,7 @@ pub mod refresh_state;
 mod status_types;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_sandbox;
+pub mod transfer;
 pub mod validation;
 
 pub(crate) use commands::command_exists;
@@ -391,7 +392,7 @@ impl AuthStatus {
 
     /// Returns true if at least one provider has usable credentials.
     pub fn has_any_available(&self) -> bool {
-        self.anthropic.state == AuthState::Available
+        let primary_provider_available = self.anthropic.state == AuthState::Available
             || self.jcode == AuthState::Available
             || self.openai == AuthState::Available
             || self.openrouter == AuthState::Available
@@ -401,7 +402,12 @@ impl AuthStatus {
             || self.antigravity == AuthState::Available
             || self.gemini == AuthState::Available
             || self.cursor == AuthState::Available
-            || self.grok_build == AuthState::Available
+            || self.grok_build == AuthState::Available;
+
+        primary_provider_available
+            || crate::provider_catalog::auth_status_login_providers()
+                .into_iter()
+                .any(|provider| self.state_for_provider(provider) == AuthState::Available)
     }
 
     /// Emit a structured, non-secret snapshot of which providers currently have

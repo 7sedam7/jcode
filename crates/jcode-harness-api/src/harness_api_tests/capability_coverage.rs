@@ -28,6 +28,7 @@ enum Disposition {
     ClientInternal,
     /// A real gap. Worth exposing, not yet done. Every entry needs a reason
     /// that says what a client cannot build without it.
+    #[allow(dead_code)]
     Gap(&'static str),
 }
 
@@ -47,6 +48,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("GetCompactedHistory", ClientInternal),
     ("GetHistory", Covered),
     ("GetModelCatalog", Covered),
+    ("GetState", ClientInternal),
     ("InputShell", ClientInternal),
     ("Message", Covered),
     ("NotifyAuthChanged", Covered),

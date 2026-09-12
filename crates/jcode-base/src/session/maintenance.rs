@@ -57,8 +57,10 @@ fn claim_prune_slot(base: &Path) -> bool {
     let marker = base.join("sessions-bak-prune.stamp");
     if let Ok(metadata) = std::fs::metadata(&marker)
         && let Ok(modified) = metadata.modified()
-        && let Ok(age) = std::time::SystemTime::now().duration_since(modified)
-        && age.as_secs() < PRUNE_INTERVAL_SECS
+        && modified
+            .elapsed()
+            .map(|age| age.as_secs() < PRUNE_INTERVAL_SECS)
+            .unwrap_or(true)
     {
         return false;
     }

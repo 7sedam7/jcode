@@ -176,6 +176,8 @@ fn swarm_effort_display_labels_are_marked_beta() {
 #[test]
 fn detected_resume_terminal_recognizes_handterm_term_program() {
     let _env_lock = crate::storage::lock_test_env();
+    let _herdr_env = EnvVarGuard::set_value("HERDR_ENV", "");
+    let _herdr_pane = EnvVarGuard::set_value("HERDR_PANE_ID", "");
     let _guard = EnvVarGuard::set_value("TERM_PROGRAM", "handterm");
     assert_eq!(detected_resume_terminal().as_deref(), Some("handterm"));
 }

@@ -391,7 +391,14 @@ fn run_auto_poke_followup_targets_below_threshold_todos() {
         }) => {
             assert_eq!(total_todos, 2);
             assert!(message.starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE));
-            assert!(message.contains("completion confidence"));
+            assert!(message.contains("Validate further:"));
+            assert!(message.contains("todo a"));
+            assert!(message.contains("todo b"));
+            assert!(
+                !message
+                    .to_ascii_lowercase()
+                    .contains("completion confidence")
+            );
             assert!(!message.to_ascii_lowercase().contains("threshold"));
         }
         _ => panic!("expected confidence-summary follow-up"),
@@ -1138,6 +1145,18 @@ fn auth_test_retryable_error_detection_handles_rate_limits() {
         "Gemini request generateContent failed (HTTP 429 Too Many Requests): RESOURCE_EXHAUSTED"
     );
     assert!(auth_test_error_is_retryable(&err));
+}
+
+#[test]
+fn auth_test_retryable_error_detection_rejects_hard_usage_limit_exhaustion() {
+    // Regression for #1148: the text contains "rate limit" but the quota
+    // resets in weeks, so retrying is pointless.
+    let err = anyhow::anyhow!(
+        "Rate limited: The usage limit has been reached. Plan: free. Resets in 28d 19h 47m (2026-09-30 18:44 UTC)."
+    );
+    assert!(!auth_test_error_is_retryable(&err));
+    let err = anyhow::anyhow!("OpenAI request failed (HTTP 429): insufficient_quota");
+    assert!(!auth_test_error_is_retryable(&err));
 }
 
 #[test]

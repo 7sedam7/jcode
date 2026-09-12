@@ -770,6 +770,9 @@ impl App {
         mut terminal: DefaultTerminal,
         remote_working_dir: Option<String>,
     ) -> Result<RunResult> {
+        if crate::tui::is_ssh_remote() {
+            self.session.working_dir = remote_working_dir.clone();
+        }
         super::terminal_liveness::capture_initial_tty();
         let mut herdr_reporter = herdr::Reporter::from_env();
         let mut event_stream = EventStream::new();

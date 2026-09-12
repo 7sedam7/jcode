@@ -16,7 +16,6 @@ impl AuthActivationRequest {
             auth,
         }
     }
-
     pub fn provider_id(&self) -> Option<String> {
         self.auth
             .as_ref()
@@ -26,13 +25,11 @@ impl AuthActivationRequest {
                 normalized_auth_provider_id(Some(provider.as_str())).map(str::to_string)
             })
     }
-
     pub fn expected_runtime(&self) -> Option<&RuntimeProviderKey> {
         self.auth
             .as_ref()
             .and_then(|auth| auth.expected_runtime.as_ref())
     }
-
     pub fn expected_catalog_namespace(&self) -> Option<&CatalogNamespace> {
         self.auth
             .as_ref()
@@ -268,9 +265,13 @@ fn globally_preferred_model_rank(model: &str) -> (u8, usize) {
     if normalized == openai_default {
         return (0, 0);
     }
-    // Some catalogs expose the clean release id instead of jcode's Sol route.
-    if normalized == "gpt-5.6" {
+    // Previous OpenAI flagship profile, then the clean release id some catalogs
+    // expose instead of jcode's Sol route. Both still outrank the Claude default.
+    if normalized == "gpt-5.6-sol" {
         return (1, 0);
+    }
+    if normalized == "gpt-5.6" {
+        return (1, 1);
     }
     if normalized == claude_default {
         return (2, 0);
@@ -899,6 +900,7 @@ fn normalized_login_provider_id(provider_id: &str) -> Option<&'static str> {
         "copilot" => Some("copilot"),
         "gemini" => Some("gemini"),
         "antigravity" => Some("antigravity"),
+        "grok-build" => Some("grok-build"),
         _ => None,
     }
 }
@@ -1186,6 +1188,7 @@ pub fn model_switch_request_for_provider_id(
         Some("copilot") => format!("copilot:{}", model),
         Some("gemini") => format!("gemini:{}", model),
         Some("antigravity") => format!("antigravity:{}", model),
+        Some("grok-build") => format!("grok-build:{}", model),
         _ => model.to_string(),
     }
 }
@@ -1389,7 +1392,6 @@ mod tests {
             );
         }
     }
-
     #[test]
     fn typed_auth_request_provider_id_wins_over_legacy_hint() {
         let request = AuthActivationRequest::new(
@@ -1420,6 +1422,7 @@ mod tests {
             ("copilot", "copilot", "GitHub Copilot"),
             ("gemini", "gemini", "Google Gemini"),
             ("antigravity", "antigravity", "Antigravity"),
+            ("grok-build", "grok-build", "Grok Build"),
         ] {
             assert_eq!(normalized_auth_provider_id(Some(hint)), Some(normalized));
             assert_eq!(provider_display_label(Some(hint)).as_deref(), Some(label));
@@ -1446,7 +1449,6 @@ mod tests {
                 missing.push(provider.id);
             }
         }
-
         assert!(
             missing.is_empty(),
             "model login providers missing lifecycle normalization: {:?}",
@@ -1498,7 +1500,6 @@ mod tests {
             );
         }
     }
-
     #[test]
     fn direct_login_provider_descriptor_matrix_has_full_lifecycle_parity() {
         // Sandbox JCODE_HOME for the same reason as the activation matrix
@@ -1540,6 +1541,9 @@ mod tests {
                 }
                 crate::provider_catalog::LoginProviderTarget::Antigravity => {
                     Some(("antigravity", "antigravity", "antigravity", "antigravity"))
+                }
+                crate::provider_catalog::LoginProviderTarget::GrokBuild => {
+                    Some(("grok-build", "grok-build", "openrouter", "grok-build"))
                 }
                 _ => None,
             }) else {
@@ -1606,7 +1610,6 @@ mod tests {
                 provider.id
             );
         }
-
         for expected in [
             "claude",
             "anthropic-api",
@@ -1619,6 +1622,7 @@ mod tests {
             "copilot",
             "gemini",
             "antigravity",
+            "grok-build",
         ] {
             assert!(
                 covered.contains(&expected),
@@ -1626,7 +1630,6 @@ mod tests {
             );
         }
     }
-
     #[test]
     fn model_switch_request_prefixes_openai_compatible_profiles_with_profile_id() {
         assert_eq!(
@@ -1655,6 +1658,7 @@ mod tests {
             ("copilot", "copilot:shared-model"),
             ("gemini", "gemini:shared-model"),
             ("antigravity", "antigravity:shared-model"),
+            ("grok-build", "grok-build:shared-model"),
             ("cerebras", "cerebras:shared-model"),
         ] {
             assert_eq!(

@@ -600,6 +600,14 @@ fn test_model_picker_remote_comtegra_model_uses_comtegra_route_not_copilot() {
     let mut app = create_test_app();
     app.is_remote = true;
     app.remote_available_entries = vec!["glm-51-nvfp4".to_string()];
+    app.remote_model_options = vec![crate::provider::ModelRoute {
+        model: "glm-51-nvfp4".to_string(),
+        provider: "Comtegra GPU Cloud".to_string(),
+        api_method: "openai-compatible:comtegra".to_string(),
+        available: true,
+        detail: String::new(),
+        cheapness: None,
+    }];
 
     app.open_model_picker();
 
@@ -649,6 +657,14 @@ fn test_model_picker_remote_bedrock_model_has_bedrock_route_when_configured() {
     let mut app = create_test_app();
     app.is_remote = true;
     app.remote_available_entries = vec!["us.amazon.nova-micro-v1:0".to_string()];
+    app.remote_model_options = vec![crate::provider::ModelRoute {
+        model: "us.amazon.nova-micro-v1:0".to_string(),
+        provider: "AWS Bedrock".to_string(),
+        api_method: "bedrock".to_string(),
+        available: true,
+        detail: String::new(),
+        cheapness: None,
+    }];
 
     app.open_model_picker();
 
