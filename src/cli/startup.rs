@@ -1,14 +1,10 @@
+use crate::{logging, perf, server, setup_hints, startup_profile, storage, telemetry};
 use anyhow::Result;
 use clap::Parser;
-use std::process::Command as ProcessCommand;
-
-use crate::{
-    build, logging, perf, server, setup_hints, startup_profile, storage, telemetry, update,
-};
 
 use super::{
     args::{Args, Command},
-    dispatch, hot_exec, output, terminal,
+    dispatch, output, terminal,
 };
 
 fn sync_output_style_from_config() {
@@ -140,8 +136,6 @@ pub async fn run() -> Result<()> {
     startup_profile::mark("telemetry_check");
 
     let args = parse_and_prepare_args(args)?;
-    spawn_background_update_check(&args);
-
     if let Err(e) = dispatch::run_main(args).await {
         report_main_error(&e);
         return Err(e);
@@ -345,144 +339,6 @@ fn remote_working_dir_is_absolute(path: &str) -> bool {
         && bytes[0].is_ascii_alphabetic()
 }
 
-fn spawn_background_update_check(args: &Args) {
-    let check_updates = should_spawn_background_update_check(args);
-    let auto_update = should_auto_install_update(args);
-
-    if !check_updates {
-        return;
-    }
-
-    if update::is_release_build() {
-        std::thread::spawn(move || {
-            use crate::bus::{Bus, BusEvent, ClientMaintenanceAction, SessionUpdateStatus};
-            match update::check_and_maybe_update(auto_update) {
-                update::UpdateCheckResult::UpdateAvailable {
-                    current, latest, ..
-                } => {
-                    logging::info(&format!("Update available: {} -> {}", current, latest));
-                }
-                update::UpdateCheckResult::UpdateInstalled { version, path } => {
-                    // When an interactive TUI session is running, hand the switch
-                    // to the app's graceful reload path (saves the input line,
-                    // waits for the current turn, resumes the session) instead of
-                    // exec-ing over the live UI, which visibly resets the screen.
-                    if let Some(session_id) = terminal::get_current_session() {
-                        logging::info(&format!(
-                            "Updated to {}. Requesting graceful session reload...",
-                            version
-                        ));
-                        Bus::global().publish(BusEvent::SessionUpdateStatus(
-                            SessionUpdateStatus::ReadyToReload {
-                                session_id,
-                                action: ClientMaintenanceAction::Update,
-                                version,
-                            },
-                        ));
-                        return;
-                    }
-                    logging::info(&format!("Updated to {}. Restarting...", version));
-                    std::thread::sleep(std::time::Duration::from_millis(250));
-                    let args: Vec<String> = std::env::args().skip(1).collect();
-                    let exec_path = build::client_update_candidate(false)
-                        .map(|(p, _)| p)
-                        .unwrap_or(path);
-                    let err = crate::platform::replace_process(
-                        ProcessCommand::new(&exec_path)
-                            .args(&args)
-                            .arg("--no-update"),
-                    );
-                    eprintln!("Failed to exec new binary: {}", err);
-                }
-                update::UpdateCheckResult::Error(e) => {
-                    logging::info(&format!("Update check failed: {}", e));
-                }
-                update::UpdateCheckResult::NoUpdate => {}
-            }
-        });
-    } else {
-        std::thread::spawn(move || {
-            use crate::bus::{Bus, BusEvent, UpdateStatus};
-
-            let start = std::time::Instant::now();
-            Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Checking));
-            if let Some(update_available) = hot_exec::check_for_updates()
-                && update_available
-            {
-                // A checkout with local commits can never fast-forward, so the
-                // pull below would always fail and surface a noisy "Update
-                // diverged. Press Ctrl+Y..." card in every new session.
-                // Developers with local work expect divergence; log it once
-                // and stay quiet in the UI (no Available/Error cards).
-                if hot_exec::local_commits_ahead_of_upstream() == Some(true) {
-                    logging::info(
-                        "Auto-update skipped: local commits are ahead of upstream (diverged). \
-                         Merge or rebase manually when ready.",
-                    );
-                    Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::UpToDate));
-                } else {
-                    Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Available {
-                        current: jcode_build_meta::version().to_string(),
-                        latest: "latest source".to_string(),
-                    }));
-                    if auto_update {
-                        logging::info("Update available - auto-updating...");
-                        Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Installing {
-                            version: "latest source".to_string(),
-                        }));
-                        if let Err(e) = hot_exec::run_auto_update() {
-                            Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Error(
-                                e.to_string(),
-                            )));
-                            logging::error(&format!(
-                                "Auto-update failed: {}. Continuing with current version.",
-                                e
-                            ));
-                        }
-                    } else {
-                        logging::info(
-                            "Update available! Run `jcode update` or `/reload` to update.",
-                        );
-                    }
-                }
-            } else {
-                Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::UpToDate));
-            }
-            logging::info(&format!(
-                "[TIMING] background_update_check: auto_update={}, total={}ms",
-                auto_update,
-                start.elapsed().as_millis()
-            ));
-        });
-    }
-}
-
-fn should_spawn_background_update_check(args: &Args) -> bool {
-    should_spawn_background_update_check_with_config(
-        args,
-        crate::config::config().features.check_updates,
-    )
-}
-
-fn should_spawn_background_update_check_with_config(args: &Args, check_updates: bool) -> bool {
-    check_updates
-        && args.ssh.is_none()
-        && !args.quiet
-        && !args.no_update
-        && !matches!(
-            args.command,
-            Some(Command::Update)
-                | Some(Command::Serve { .. })
-                | Some(Command::Server { .. })
-                | Some(Command::Acp)
-        )
-        && args.resume.is_none()
-}
-
-fn should_auto_install_update(args: &Args) -> bool {
-    args.auto_update
-}
-
 fn report_main_error(error: &anyhow::Error) {
     let error_str = format!("{:?}", error);
     logging::error(&error_str);
@@ -552,25 +408,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_install_allowed_without_live_terminal() {
-        let args = parse_args(&["jcode", "login"]);
-        assert!(should_auto_install_update(&args));
-    }
-
-    #[test]
-    fn auto_install_allowed_with_live_terminal_attached() {
-        let args = parse_args(&["jcode", "login"]);
-        assert!(should_auto_install_update(&args));
-    }
-
-    #[test]
-    fn auto_install_respects_explicit_disable_even_without_terminal() {
-        let mut args = parse_args(&["jcode", "login"]);
-        args.auto_update = false;
-        assert!(!should_auto_install_update(&args));
-    }
-
-    #[test]
     fn remote_working_dir_validation_requires_absolute_path() {
         assert!(validate_remote_working_dir(Some("/home/agent/project")).is_ok());
         assert!(validate_remote_working_dir(Some("C:\\Users\\agent\\project")).is_ok());
@@ -582,25 +419,6 @@ mod tests {
                 .to_string()
                 .contains("--remote-working-dir must be an absolute path")
         );
-    }
-
-    #[test]
-    fn update_command_still_skips_background_check_before_auto_install_logic() {
-        let args = parse_args(&["jcode", "update"]);
-        assert!(matches!(args.command, Some(Command::Update)));
-        assert!(!should_spawn_background_update_check(&args));
-        assert!(should_auto_install_update(&args));
-    }
-
-    #[test]
-    fn config_can_permanently_disable_background_update_checks() {
-        let args = parse_args(&["jcode", "login"]);
-        assert!(should_spawn_background_update_check_with_config(
-            &args, true
-        ));
-        assert!(!should_spawn_background_update_check_with_config(
-            &args, false
-        ));
     }
 
     #[test]

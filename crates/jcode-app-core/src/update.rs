@@ -2,9 +2,9 @@ use crate::build;
 use crate::storage;
 use anyhow::{Context, Result};
 use jcode_update_core::{
-    BACKGROUND_UPDATE_THRESHOLD, estimate_release_update_duration, estimate_source_update_duration,
-    format_duration_estimate, get_asset_name, summarize_git_pull_failure, update_estimate,
-    verify_asset_checksum_text, version_is_newer,
+    BACKGROUND_UPDATE_THRESHOLD, estimate_release_update_duration, format_duration_estimate,
+    get_asset_name, summarize_git_pull_failure, update_estimate, verify_asset_checksum_text,
+    version_is_newer,
 };
 pub use jcode_update_core::{
     DownloadProgress, GIT_PULL_DIVERGED_SUMMARY, GitHubAsset, GitHubRelease, PreparedUpdate,
@@ -21,6 +21,8 @@ use std::time::{Duration, Instant, SystemTime};
 mod update_dev_guard;
 #[path = "update_metadata.rs"]
 mod update_metadata;
+#[path = "update_nightly.rs"]
+mod update_nightly;
 #[path = "update_rate_limit.rs"]
 mod update_rate_limit;
 pub use update_metadata::UpdateMetadata;
@@ -133,28 +135,6 @@ fn source_build_root() -> Result<PathBuf> {
     Ok(storage::jcode_dir()?.join("builds").join("source"))
 }
 
-fn source_build_repo_dir() -> Result<PathBuf> {
-    Ok(source_build_root()?.join("jcode"))
-}
-
-pub fn should_auto_update() -> bool {
-    if std::env::var("JCODE_NO_AUTO_UPDATE").is_ok() {
-        return false;
-    }
-
-    if !is_release_build() {
-        return false;
-    }
-
-    if let Ok(exe) = std::env::current_exe()
-        && is_inside_git_repo(&exe)
-    {
-        return false;
-    }
-
-    true
-}
-
 pub fn run_git_pull_ff_only(repo_dir: &Path, quiet: bool) -> Result<()> {
     let mut cmd = std::process::Command::new("git");
     cmd.arg("pull").arg("--ff-only");
@@ -171,22 +151,6 @@ pub fn run_git_pull_ff_only(repo_dir: &Path, quiet: bool) -> Result<()> {
     } else {
         anyhow::bail!("{}", summarize_git_pull_failure(&output.stderr));
     }
-}
-
-fn is_inside_git_repo(path: &std::path::Path) -> bool {
-    let mut dir = if path.is_dir() {
-        Some(path)
-    } else {
-        path.parent()
-    };
-
-    while let Some(d) = dir {
-        if d.join(".git").exists() {
-            return true;
-        }
-        dir = d.parent();
-    }
-    false
 }
 
 pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
@@ -350,119 +314,8 @@ fn install_main_source_update_blocking(latest_sha: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn prepare_stable_update_blocking() -> Result<PreparedUpdate> {
-    let current_version = jcode_build_meta::version();
-    let release = fetch_latest_release_blocking()?;
-
-    if !release_is_update(&release)? {
-        return Ok(PreparedUpdate::None {
-            current: current_version.to_string(),
-        });
-    }
-
-    let Ok(asset) = platform_asset(&release) else {
-        return Ok(PreparedUpdate::None {
-            current: current_version.to_string(),
-        });
-    };
-    let metadata = UpdateMetadata::load().unwrap_or_default();
-    let duration = estimate_release_update_duration(asset._size, metadata.last_release_update_secs);
-    let size_mb = asset._size as f64 / (1024.0 * 1024.0);
-    let summary = format!(
-        "Prebuilt update {} → {} (~{:.0} MB, {}). {}",
-        current_version,
-        release.tag_name,
-        size_mb,
-        format_duration_estimate(duration),
-        if duration >= BACKGROUND_UPDATE_THRESHOLD {
-            "Running in the background and will reload when it is ready."
-        } else {
-            "This should be quick."
-        }
-    );
-
-    Ok(PreparedUpdate::Stable {
-        release,
-        estimate: update_estimate(summary, duration),
-    })
-}
-
-fn prepare_main_update_blocking() -> Result<PreparedUpdate> {
-    let current_hash = jcode_build_meta::git_hash();
-    if current_hash.is_empty() || current_hash == "unknown" {
-        crate::logging::info("Main channel: no git hash in binary, skipping update check");
-        return Ok(PreparedUpdate::None {
-            current: jcode_build_meta::version().to_string(),
-        });
-    }
-
-    let latest_sha = latest_main_sha_blocking()?;
-    if latest_sha.is_empty() {
-        return Ok(PreparedUpdate::None {
-            current: current_hash.to_string(),
-        });
-    }
-
-    let current_short = if current_hash.len() >= 7 {
-        &current_hash[..7]
-    } else {
-        current_hash
-    };
-
-    if current_short == latest_sha {
-        crate::logging::info(&format!("Main channel: up to date ({})", current_short));
-        return Ok(PreparedUpdate::None {
-            current: format!("main-{}", current_short),
-        });
-    }
-
-    crate::logging::info(&format!(
-        "Main channel: new commit {} -> {}",
-        current_short, latest_sha
-    ));
-
-    if has_cargo() {
-        let repo_dir = source_build_repo_dir()?;
-        let repo_exists = repo_dir.join(".git").exists();
-        let has_previous_build = build::release_binary_path(&repo_dir).exists();
-        let metadata = UpdateMetadata::load().unwrap_or_default();
-        let duration = estimate_source_update_duration(
-            repo_exists,
-            has_previous_build,
-            metadata.last_source_update_secs,
-        );
-        let action = if repo_exists {
-            if has_previous_build {
-                "git pull + cargo build with a warm build cache"
-            } else {
-                "git pull + cargo build"
-            }
-        } else {
-            "initial clone + cargo build"
-        };
-        let summary = format!(
-            "Source update {} → main-{} requires {} ({}). Running in the background and will reload when it is ready.",
-            current_short,
-            latest_sha,
-            action,
-            format_duration_estimate(duration)
-        );
-        return Ok(PreparedUpdate::MainSource {
-            latest_sha,
-            estimate: update_estimate(summary, duration),
-        });
-    }
-
-    crate::logging::info("Main channel: cargo not found, falling back to latest release");
-    prepare_stable_update_blocking()
-}
-
 pub fn prepare_update_blocking() -> Result<PreparedUpdate> {
-    let channel = crate::config::config().features.update_channel;
-    match channel {
-        crate::config::UpdateChannel::Main => prepare_main_update_blocking(),
-        crate::config::UpdateChannel::Stable => prepare_stable_update_blocking(),
-    }
+    update_nightly::prepare_manual_update_blocking()
 }
 
 /// Log the full error and return a single short line for the UI.
@@ -575,6 +428,10 @@ pub fn check_for_update_blocking() -> Result<Option<GitHubRelease>> {
         crate::config::UpdateChannel::Main => check_for_main_update_blocking(),
         crate::config::UpdateChannel::Stable => check_for_stable_update_blocking(),
     }
+}
+
+pub fn check_for_manual_update_blocking() -> Result<Option<GitHubRelease>> {
+    update_nightly::check_manual_update_blocking()
 }
 
 fn check_for_stable_update_blocking() -> Result<Option<GitHubRelease>> {
@@ -1022,6 +879,7 @@ pub fn download_and_install_blocking_with_progress(
             anyhow::bail!("Could not find jcode binary inside tar.gz archive");
         };
         crate::platform::set_permissions_executable(&extracted_binary)?;
+        update_nightly::verify_downloaded_binary(release, &extracted_binary)?;
 
         let version = release.tag_name.trim_start_matches('v');
         let dest_dir = build::builds_dir()?.join("versions").join(version);
@@ -1070,6 +928,8 @@ pub fn download_and_install_blocking_with_progress(
         installed_version_dir = Some(dest_dir.join(build::binary_name()));
     } else {
         fs::write(&temp_path, &bytes).context("Failed to write temp file")?;
+        crate::platform::set_permissions_executable(&temp_path)?;
+        update_nightly::verify_downloaded_binary(release, &temp_path)?;
     }
 
     let version = release.tag_name.trim_start_matches('v');
@@ -1078,7 +938,6 @@ pub fn download_and_install_blocking_with_progress(
     let versioned_path = if let Some(versioned_path) = installed_version_dir {
         versioned_path
     } else {
-        crate::platform::set_permissions_executable(&temp_path)?;
         let versioned_path = build::install_binary_at_version(&temp_path, version)?;
         let _ = fs::remove_file(&temp_path);
         versioned_path
@@ -1100,111 +959,6 @@ pub fn download_and_install_blocking_with_progress(
     record_release_update_duration(started.elapsed());
 
     Ok(versioned_path)
-}
-
-pub fn check_and_maybe_update(auto_install: bool) -> UpdateCheckResult {
-    use crate::bus::{Bus, BusEvent, UpdateStatus};
-
-    if !should_auto_update() {
-        return UpdateCheckResult::NoUpdate;
-    }
-
-    let metadata = UpdateMetadata::load().unwrap_or_default();
-    if !metadata.should_check() {
-        return UpdateCheckResult::NoUpdate;
-    }
-
-    Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Checking));
-
-    match check_for_update_blocking() {
-        Ok(Some(release)) => {
-            let current = jcode_build_meta::version().to_string();
-            let latest = release.tag_name.clone();
-
-            Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Available {
-                current: current.clone(),
-                latest: latest.clone(),
-            }));
-
-            if auto_install {
-                let progress_version = latest.clone();
-                match download_and_install_blocking_with_progress(&release, |progress| {
-                    Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Downloading {
-                        version: progress_version.clone(),
-                        downloaded: progress.downloaded,
-                        total: progress.total,
-                    }));
-                }) {
-                    Ok(path) => {
-                        Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Installed {
-                            version: latest.clone(),
-                        }));
-                        UpdateCheckResult::UpdateInstalled {
-                            version: latest,
-                            path,
-                        }
-                    }
-                    Err(e) => {
-                        let msg = format!("Failed to install: {}", e);
-                        Bus::global()
-                            .publish(BusEvent::UpdateStatus(UpdateStatus::Error(msg.clone())));
-                        UpdateCheckResult::Error(msg)
-                    }
-                }
-            } else {
-                let mut metadata = UpdateMetadata::load().unwrap_or_default();
-                metadata.last_check = SystemTime::now();
-                let _ = metadata.save();
-                UpdateCheckResult::UpdateAvailable {
-                    current,
-                    latest,
-                    _release: release,
-                }
-            }
-        }
-        Ok(None) => {
-            repair_stale_shared_server_after_no_update();
-            Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::UpToDate));
-            let mut metadata = UpdateMetadata::load().unwrap_or_default();
-            metadata.last_check = SystemTime::now();
-            let _ = metadata.save();
-            UpdateCheckResult::NoUpdate
-        }
-        Err(e) => {
-            let msg = short_update_error("update check failed", &e);
-            if is_rate_limit_error(&msg) {
-                // Throttling is not an update failure and there is nothing the
-                // user needs to do, so keep it out of the UI. The backoff was
-                // already persisted, so we stop retrying too.
-                crate::logging::info(&msg);
-                Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::UpToDate));
-                return UpdateCheckResult::NoUpdate;
-            }
-            Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Error(msg.clone())));
-            UpdateCheckResult::Error(msg)
-        }
-    }
-}
-
-fn repair_stale_shared_server_after_no_update() {
-    match build::repair_stale_shared_server_channel() {
-        Ok(build::SharedServerRepair::Repaired {
-            previous,
-            repaired_to,
-        }) => {
-            crate::logging::info(&format!(
-                "update: repaired stale shared-server channel {:?} -> {} after no-op update check",
-                previous, repaired_to
-            ));
-        }
-        Ok(build::SharedServerRepair::AlreadyCurrent) => {}
-        Err(error) => {
-            crate::logging::warn(&format!(
-                "update: failed to repair stale shared-server channel after no-op update check: {}",
-                error
-            ));
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1354,11 +1108,6 @@ mod tests {
     }
 
     #[test]
-    fn test_should_auto_update_dev_build() {
-        assert!(!should_auto_update());
-    }
-
-    #[test]
     fn test_summarize_git_pull_failure_diverged() {
         let stderr = b"hint: You have divergent branches and need to specify how to reconcile them.\nfatal: Need to specify how to reconcile divergent branches.\n";
         assert_eq!(
@@ -1403,7 +1152,7 @@ mod tests {
     #[test]
     fn test_estimate_source_update_duration_prefers_history() {
         assert_eq!(
-            estimate_source_update_duration(true, true, Some(123.4)),
+            jcode_update_core::estimate_source_update_duration(true, true, Some(123.4)),
             Duration::from_secs(123)
         );
     }

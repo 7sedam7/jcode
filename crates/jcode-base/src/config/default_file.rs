@@ -271,9 +271,8 @@ prompt_entry_animation = true
 # error = "#ff6464"
 
 [features]
-# Check for and install updates during startup. Set to false for the persistent
-# equivalent of passing --no-update on every invocation.
-check_updates = true
+# Startup update checks and installs are disabled; use /update or `jcode update`.
+check_updates = false
 # Memory: retrieval + extraction sidecar features
 memory = true
 # Swarm: multi-session coordination features
@@ -291,8 +290,7 @@ persist_memory_injections = false
 # (avoidable) reason: system prompt, tool set, or message prefix changed. These
 # should essentially never happen and indicate a prefix-cache bug.
 kv_cache_miss_notices = true
-# Update channel: "stable" (releases only) or "main" (latest commits on push)
-# Set to "main" for bleeding edge updates every time code is pushed
+# Legacy startup channel setting. Manual updates use this fork's nightly release.
 update_channel = "stable"
 
 [websearch]

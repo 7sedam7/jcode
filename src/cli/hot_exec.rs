@@ -139,9 +139,9 @@ pub fn hot_reload(session_id: &str) -> Result<()> {
 pub fn hot_update(session_id: &str) -> Result<()> {
     let cwd = std::env::current_dir()?;
 
-    update::print_centered("Checking for updates...");
+    update::print_centered("Checking fork nightly for updates...");
 
-    match update::check_for_update_blocking() {
+    match update::check_for_manual_update_blocking() {
         Ok(Some(release)) => {
             let current = jcode_build_meta::version();
             update::print_centered(&format!(
@@ -384,8 +384,8 @@ pub fn run_auto_update() -> Result<()> {
 /// Explicit updates follow the configured channel for release and dev builds alike.
 /// Source rebuilds belong to self-dev and /rebuild, not the stable update path.
 pub fn run_update() -> Result<()> {
-    update::print_centered("Checking GitHub for latest release...");
-    match update::check_for_update_blocking() {
+    update::print_centered("Checking fork nightly release...");
+    match update::check_for_manual_update_blocking() {
         Ok(Some(release)) => {
             update::print_centered(&format!(
                 "Downloading {} \u{2192} {}...",

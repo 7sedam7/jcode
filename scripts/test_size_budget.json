@@ -4,7 +4,6 @@
     "crates/jcode-app-core/src/agent_tests.rs": 2202,
     "crates/jcode-app-core/src/server/client_lifecycle_tests.rs": 1679,
     "crates/jcode-app-core/src/server/comm_control_tests/dag_e2e.rs": 1332,
-    "crates/jcode-app-core/src/server/comm_session_tests.rs": 1207,
     "crates/jcode-app-core/src/server/provider_control_tests.rs": 1439,
     "crates/jcode-app-core/src/server/swarm_persistence_tests.rs": 1232,
     "crates/jcode-app-core/src/tool/bash_tests.rs": 1217,

@@ -59,9 +59,9 @@ pub(crate) struct Args {
     #[arg(long, global = true)]
     pub(crate) no_update: bool,
 
-    /// Auto-update when new version is available (default: true for release builds)
-    #[arg(long, global = true, default_value = "true")]
-    pub(crate) auto_update: bool,
+    /// Deprecated compatibility flag; startup updates remain disabled
+    #[arg(long = "auto-update", global = true, hide = true)]
+    pub(crate) _auto_update: bool,
 
     /// Log tool inputs/outputs and token usage to stderr
     #[arg(long, global = true)]
@@ -275,7 +275,7 @@ pub(crate) enum Command {
     /// Run in simple REPL mode (no TUI)
     Repl,
 
-    /// Update jcode to the latest version
+    /// Update jcode from the latest 7sedam7/jcode nightly build
     Update,
 
     /// Show build/version information in human or JSON form
