@@ -19,6 +19,8 @@ pub(crate) struct PersistedCopilotCatalog {
     pub models: Vec<String>,
     #[serde(default)]
     pub specs: CatalogSpecs,
+    #[serde(default)]
+    pub credential_key: String,
     pub fetched_at_rfc3339: String,
 }
 
@@ -27,14 +29,17 @@ impl CopilotApiProvider {
         Ok(jcode_base::storage::app_config_dir()?.join("copilot_models_cache.json"))
     }
 
-    fn load_persisted_catalog() -> Option<PersistedCopilotCatalog> {
+    fn load_persisted_catalog(token: &str) -> Option<PersistedCopilotCatalog> {
         let path = Self::persisted_catalog_path().ok()?;
         jcode_base::storage::read_json(&path)
             .ok()
-            .filter(|catalog: &PersistedCopilotCatalog| !catalog.models.is_empty())
+            .filter(|catalog: &PersistedCopilotCatalog| {
+                !catalog.models.is_empty()
+                    && catalog.credential_key == copilot_auth_enterprise::token_cache_key(token)
+            })
     }
 
-    fn persist_catalog(models: &[String], specs: &CatalogSpecs) {
+    fn persist_catalog(token: &str, models: &[String], specs: &CatalogSpecs) {
         if models.is_empty() {
             return;
         }
@@ -44,6 +49,7 @@ impl CopilotApiProvider {
         let payload = PersistedCopilotCatalog {
             models: models.to_vec(),
             specs: specs.clone(),
+            credential_key: copilot_auth_enterprise::token_cache_key(token),
             fetched_at_rfc3339: Utc::now().to_rfc3339(),
         };
         if let Err(error) = jcode_base::storage::write_json(&path, &payload) {
@@ -80,7 +86,12 @@ impl CopilotApiProvider {
     }
 
     pub(crate) fn seed_cached_catalog(&self) {
-        if let Some(catalog) = Self::load_persisted_catalog() {
+        let token = self
+            .github_token
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(catalog) = Self::load_persisted_catalog(&token) {
             if let Ok(mut models) = self.fetched_models.write() {
                 *models = catalog.models;
             }
@@ -117,6 +128,7 @@ impl CopilotApiProvider {
         &self,
         model: &str,
         bearer: &str,
+        credential_generation: u64,
     ) -> copilot_auth::CopilotEndpoint {
         if let Ok(specs) = self.model_specs.read()
             && let Some(spec) = specs.get(model)
@@ -137,10 +149,12 @@ impl CopilotApiProvider {
                 Self::publish_context_limits(&models);
                 let fresh_specs = CatalogSpecs::from_models(&models);
                 let endpoint = fresh_specs.endpoint_for(model);
-                if let Ok(mut specs) = self.model_specs.write() {
-                    *specs = fresh_specs.clone();
-                }
-                Self::persist_catalog(&self.available_model_ids(), &fresh_specs);
+                self.with_current_credential(bearer, credential_generation, || {
+                    if let Ok(mut specs) = self.model_specs.write() {
+                        *specs = fresh_specs.clone();
+                    }
+                    Self::persist_catalog(bearer, &self.available_model_ids(), &fresh_specs);
+                });
                 jcode_base::logging::info(&format!(
                     "Copilot catalog refreshed: '{model}' serves {}",
                     endpoint.path()
@@ -197,7 +211,7 @@ impl CopilotApiProvider {
     /// Always fetches, even when the model is pinned: the catalog also feeds the
     /// picker and the context-window limits, so skipping the fetch would leave
     /// jcode guessing at both.
-    pub async fn detect_tier_and_set_default(&self) {
+    pub async fn detect_tier_and_set_default(&self) -> Result<()> {
         let detect_start = std::time::Instant::now();
         let pinned_model = std::env::var("JCODE_COPILOT_MODEL")
             .ok()
@@ -214,9 +228,10 @@ impl CopilotApiProvider {
                     e
                 ));
                 self.mark_init_done();
-                return;
+                return Err(e);
             }
         };
+        let credential_generation = self.credential_generation();
 
         // Ask GitHub what this seat is and where its traffic goes, before the
         // catalog fetch: an enterprise seat is served from a different host, so
@@ -232,13 +247,16 @@ impl CopilotApiProvider {
                     info.organization_login_list.join(", "),
                     info.api_base().unwrap_or("(not reported)")
                 ));
-                if let Ok(mut account) = self.account_type.write() {
-                    *account = info.account_type();
-                }
+                let account_type = info.account_type();
+                self.with_current_credential(&bearer, credential_generation, || {
+                    if let Ok(mut account) = self.account_type.write() {
+                        *account = account_type;
+                    }
+                });
             }
             Err(e) => jcode_base::logging::info(&format!(
                 "Copilot seat lookup failed ({e}); using the {} endpoint",
-                copilot_auth_enterprise::api_base()
+                copilot_auth_enterprise::api_base_for(&bearer)
             )),
         }
 
@@ -253,8 +271,6 @@ impl CopilotApiProvider {
                     .into_iter()
                     .filter(copilot_auth::CopilotModelInfo::is_usable_for_chat)
                     .collect();
-                copilot_auth::record_catalog_billing(&models);
-                Self::publish_context_limits(&models);
                 let picker_models: Vec<String> = models
                     .iter()
                     .filter(|m| m.model_picker_enabled)
@@ -290,29 +306,39 @@ impl CopilotApiProvider {
                     }
                     None => default,
                 };
-                // Detection runs asynchronously, so a `--model` flag, a `/model`
-                // pick, or a session restore has usually already landed by now.
-                // Overwriting it here is what silently routed every turn to the
-                // catalog default regardless of what the user selected.
-                self.apply_catalog_default(chosen, &all_ids);
                 let display_models = if picker_models.is_empty() {
-                    all_ids
+                    all_ids.clone()
                 } else {
                     picker_models
                 };
-                // Blocking writes, not `try_write`: a failed try silently drops
-                // the catalog and leaves the picker empty for the whole session.
-                if let Ok(mut fm) = self.fetched_models.write() {
-                    *fm = display_models;
-                }
-                if let Ok(mut source) = self.catalog_source.write() {
-                    *source = CatalogSource::Live;
-                }
                 let fresh_specs = CatalogSpecs::from_models(&models);
-                if let Ok(mut specs) = self.model_specs.write() {
-                    *specs = fresh_specs.clone();
+                let committed =
+                    self.with_current_credential(&bearer, credential_generation, || {
+                        copilot_auth::record_catalog_billing(&models);
+                        Self::publish_context_limits(&models);
+                        // Detection runs asynchronously, so a `--model` flag, a
+                        // `/model` pick, or a session restore may already have landed.
+                        self.apply_catalog_default(chosen, &all_ids);
+                        if let Ok(mut fm) = self.fetched_models.write() {
+                            *fm = display_models;
+                        }
+                        if let Ok(mut source) = self.catalog_source.write() {
+                            *source = CatalogSource::Live;
+                        }
+                        if let Ok(mut specs) = self.model_specs.write() {
+                            *specs = fresh_specs.clone();
+                        }
+                        Self::persist_catalog(&bearer, &self.available_model_ids(), &fresh_specs);
+                    });
+                if committed.is_none() {
+                    jcode_base::logging::info(
+                        "Discarding stale Copilot catalog fetched with a superseded credential",
+                    );
+                    self.mark_init_done();
+                    return Ok(());
                 }
-                Self::persist_catalog(&self.available_model_ids(), &fresh_specs);
+                self.mark_init_done();
+                Ok(())
             }
             Err(e) => {
                 jcode_base::logging::info(&format!(
@@ -322,8 +348,9 @@ impl CopilotApiProvider {
                     detect_start.elapsed().as_millis(),
                     e
                 ));
+                self.mark_init_done();
+                Err(e)
             }
         }
-        self.mark_init_done();
     }
 }

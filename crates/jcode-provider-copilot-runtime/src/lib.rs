@@ -6,6 +6,7 @@
 //! at startup.
 
 mod catalog;
+mod endpoint;
 mod errors;
 mod messages;
 mod responses;
@@ -70,13 +71,14 @@ enum CatalogSource {
     Live,
 }
 
-/// Copilot API provider - uses GitHub Copilot's OpenAI-compatible API.
-/// Authenticates via GitHub OAuth token, exchanges for Copilot bearer token,
-/// and sends requests to api.githubcopilot.com.
+/// Copilot API provider - uses GitHub Copilot's model-specific APIs.
+/// Authenticates with the GitHub OAuth token directly and discovers the API
+/// endpoint assigned to the user's seat before inference.
 pub struct CopilotApiProvider {
     client: reqwest::Client,
     model: Arc<RwLock<String>>,
-    github_token: String,
+    github_token: Arc<RwLock<String>>,
+    credential_generation: Arc<std::sync::atomic::AtomicU64>,
     fetched_models: Arc<RwLock<Vec<String>>>,
     /// Per-model endpoint + limits, as last reported by `/models`.
     model_specs: Arc<RwLock<CatalogSpecs>>,
@@ -117,15 +119,6 @@ fn intern_effort(effort: &str) -> Option<&'static str> {
         .iter()
         .find(|known| known.eq_ignore_ascii_case(effort))
         .copied()
-}
-
-/// Base URL for Copilot API requests.
-///
-/// Prefers the endpoint GitHub assigned this seat (enterprise seats are served
-/// from `api.enterprise.githubcopilot.com`), falling back to the configured
-/// deployment's default until discovery answers.
-fn request_base_url() -> String {
-    copilot_auth_enterprise::api_base()
 }
 
 impl CopilotApiProvider {
@@ -240,7 +233,8 @@ impl CopilotApiProvider {
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
-            github_token,
+            github_token: Arc::new(RwLock::new(github_token)),
+            credential_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
             model_specs: Arc::new(RwLock::new(CatalogSpecs::default())),
             catalog_source: Arc::new(RwLock::new(CatalogSource::None)),
@@ -278,7 +272,8 @@ impl CopilotApiProvider {
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
-            github_token,
+            github_token: Arc::new(RwLock::new(github_token)),
+            credential_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
             model_specs: Arc::new(RwLock::new(CatalogSpecs::default())),
             catalog_source: Arc::new(RwLock::new(CatalogSource::None)),
@@ -414,20 +409,6 @@ impl CopilotApiProvider {
         notified.await;
     }
 
-    /// The bearer token for Copilot API calls.
-    ///
-    /// Copilot accepts the user's GitHub OAuth token directly, so there is no
-    /// exchange step, nothing cached, and no expiry to track. A token that stops
-    /// working means the user must re-authenticate.
-    async fn get_bearer_token(&self) -> Result<String> {
-        Ok(self.github_token.clone())
-    }
-
-    /// Check if an error indicates token expiration
-    fn is_auth_error(status: reqwest::StatusCode) -> bool {
-        status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
-    }
-
     /// Build OpenAI-compatible messages array from our message format.
     fn build_messages(system: &str, messages: &[ChatMessage]) -> Vec<Value> {
         build_copilot_messages(system, messages)
@@ -458,8 +439,6 @@ impl CopilotApiProvider {
         let max_tokens: u32 = 32_768;
         let initiator = if is_user_initiated { "user" } else { "agent" };
         let has_images = raw.has_images();
-        let api_base = request_base_url();
-
         const MAX_RETRIES: u32 = 3;
         const RETRY_BASE_DELAY_MS: u64 = 1000;
         let mut last_error: Option<anyhow::Error> = None;
@@ -499,6 +478,14 @@ impl CopilotApiProvider {
                     return;
                 }
             };
+            let credential_generation = self.credential_generation();
+
+            // The public `/models` endpoint accepts Enterprise-seat tokens even
+            // when inference must use api.enterprise.githubcopilot.com. Resolve
+            // the seat endpoint before choosing the request URL so a fresh
+            // persistent server cannot race its first post-login prompt against
+            // background catalog discovery.
+            let api_base = self.ensure_request_api_base(&bearer_token).await;
 
             // Copilot rejects a model sent to an endpoint it does not serve
             // (HTTP 400 `unsupported_api_for_model`), so the route comes from
@@ -510,7 +497,15 @@ impl CopilotApiProvider {
             // tier detection disabled and seeds from a cached catalog, so any
             // model GitHub added since that cache was written is picker-visible
             // but undescribed. Fetch before guessing.
-            let endpoint = self.endpoint_for_model(&model, &bearer_token).await;
+            let endpoint = self
+                .endpoint_for_model(&model, &bearer_token, credential_generation)
+                .await;
+            if !self.credential_is_current(&bearer_token, credential_generation) {
+                last_error = Some(anyhow::anyhow!(
+                    "Copilot credentials changed while preparing the request"
+                ));
+                continue;
+            }
 
             // Check vision only after endpoint_for_model has refreshed an unknown
             // model's spec. Checking first would emit a false warning for a vision
@@ -641,6 +636,40 @@ impl CopilotApiProvider {
                         "Copilot authentication failed (HTTP {status}). Run `jcode login --provider copilot` to re-authenticate: {body_text}"
                     )))
                     .await;
+                return;
+            }
+
+            // A same-account entitlement change can move inference hosts while
+            // the OAuth token remains valid. Refresh endpoint discovery once on
+            // a forbidden response and retry only if GitHub reports a new host.
+            if status == reqwest::StatusCode::FORBIDDEN && attempt + 1 < MAX_RETRIES {
+                let body_text = jcode_base::util::http_error_body(resp, "HTTP error").await;
+                if let Some(refreshed_base) = self
+                    .refresh_api_base_after_forbidden(&bearer_token, &api_base)
+                    .await
+                {
+                    jcode_base::logging::info(&format!(
+                        "Copilot inference endpoint changed after HTTP 403: {api_base} -> {refreshed_base}; retrying"
+                    ));
+                    last_error = Some(anyhow::anyhow!(
+                        "Copilot API error (HTTP {}): {}",
+                        status,
+                        body_text
+                    ));
+                    continue;
+                }
+                let body_text = errors::annotate(status.as_u16(), &body_text);
+                if tx
+                    .send(Err(anyhow::anyhow!(
+                        "Copilot API error (HTTP {}): {}",
+                        status,
+                        body_text
+                    )))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
                 return;
             }
 
@@ -898,7 +927,8 @@ impl Provider for CopilotApiProvider {
         let provider = CopilotApiProvider {
             client: self.client.clone(),
             model: self.model.clone(),
-            github_token: self.github_token.clone(),
+            github_token: Arc::clone(&self.github_token),
+            credential_generation: Arc::clone(&self.credential_generation),
             fetched_models: self.fetched_models.clone(),
             model_specs: self.model_specs.clone(),
             catalog_source: self.catalog_source.clone(),
@@ -1015,8 +1045,15 @@ impl Provider for CopilotApiProvider {
             ));
             return Ok(());
         }
-        self.detect_tier_and_set_default().await;
-        Ok(())
+        self.detect_tier_and_set_default().await
+    }
+
+    async fn invalidate_credentials(&self) {
+        self.invalidate_credentials_and_catalog().await;
+    }
+
+    fn reload_credentials(&self) {
+        self.reload_credentials_now();
     }
 
     fn supports_compaction(&self) -> bool {
@@ -1057,7 +1094,8 @@ impl Provider for CopilotApiProvider {
         Arc::new(CopilotApiProvider {
             client: self.client.clone(),
             model: Arc::new(RwLock::new(self.model())),
-            github_token: self.github_token.clone(),
+            github_token: Arc::clone(&self.github_token),
+            credential_generation: Arc::clone(&self.credential_generation),
             fetched_models: self.fetched_models.clone(),
             model_specs: self.model_specs.clone(),
             catalog_source: self.catalog_source.clone(),
@@ -1139,3 +1177,7 @@ mod tests;
 #[cfg(test)]
 #[path = "fork_tests.rs"]
 mod fork_tests;
+
+#[cfg(test)]
+#[path = "endpoint_tests.rs"]
+mod endpoint_tests;

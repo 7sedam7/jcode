@@ -1141,13 +1141,13 @@ fn new_session_fork_reloads_changed_config_provider_and_model() {
 }
 
 include!("tests/auth_refresh.rs");
+include!("tests/copilot_auth_refresh.rs");
 include!("tests/model_resolution.rs");
 include!("tests/issue_534_profile_preservation.rs");
 include!("tests/fallback_failover.rs");
 include!("tests/catalog_subscription.rs");
 include!("tests/copilot_fork.rs");
 /// Rendering the route catalog must never schedule network work.
-///
 /// Regression guard for the "spawning a session refetches every provider
 /// catalog" bug: route building used to schedule a background `/models` fetch
 /// for each stale or missing profile cache, so every session attach and picker

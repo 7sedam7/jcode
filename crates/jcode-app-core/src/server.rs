@@ -37,6 +37,7 @@ mod jade_relay;
 mod lifecycle;
 mod live_turn;
 mod provider_control;
+mod provider_control_deferred;
 mod reload;
 mod reload_recovery;
 mod reload_state;
@@ -105,7 +106,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OnceCell, RwLock, broadcast, mpsc};
-
 pub(super) type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 pub(super) type ChannelSubscriptions =
     Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;

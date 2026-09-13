@@ -8,7 +8,6 @@ use std::pin::Pin;
 use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
-
 async fn recv_final_catalog_notification(rx: &mut mpsc::UnboundedReceiver<ServerEvent>) -> String {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
@@ -519,16 +518,15 @@ async fn notify_auth_changed_defers_busy_session_refresh_until_idle() {
     )
     .await;
 
+    assert!(matches!(
+        client_event_rx.recv().await,
+        Some(ServerEvent::Done { id: 43 })
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(
-        matches!(
-            client_event_rx.recv().await,
-            Some(ServerEvent::Done { id: 43 })
-        ),
-        "expected immediate Done ack before waiting for the busy session"
-    );
-    assert!(
-        !*busy_state.logged_in.read().unwrap(),
-        "busy session provider should not refresh until its agent lock is released"
+        !matches!(client_event_rx.try_recv(), Ok(ServerEvent::Notification {
+        notification_type: NotificationType::Message { scope: Some(scope), .. }, ..
+    }) if scope == "catalog_activity")
     );
 
     drop(busy_guard);

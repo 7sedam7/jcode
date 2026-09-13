@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
 use super::client_state::model_catalog_event_for_delivery;
+use super::provider_control_deferred::spawn_deferred_auth_refreshes;
 use crate::agent::Agent;
 use crate::auth::lifecycle::{AuthActivationRequest, AuthActivationResult};
 use crate::protocol::{AuthChanged, NotificationType, ServerEvent};
@@ -275,19 +276,6 @@ async fn auth_refresh_targets(
         providers: handles,
         session_providers: session_handles,
         deferred_agents,
-    }
-}
-
-fn spawn_deferred_auth_refreshes(agents: Vec<Arc<Mutex<Agent>>>) {
-    for agent in agents {
-        tokio::spawn(async move {
-            let provider = {
-                let agent_guard = agent.lock().await;
-                agent_guard.provider_handle()
-            };
-            provider.on_auth_changed_preserve_current_provider();
-            crate::bus::Bus::global().publish_models_updated();
-        });
     }
 }
 
@@ -1137,7 +1125,7 @@ pub(super) async fn handle_notify_auth_changed(
             ),
         ));
 
-        spawn_deferred_auth_refreshes(deferred_agents);
+        let deferred_refreshes_pending = spawn_deferred_auth_refreshes(deferred_agents);
 
         // Hot-initializing providers is synchronous, while dynamic catalogs may
         // continue refreshing in the background. Push an immediate snapshot so
@@ -1153,9 +1141,10 @@ pub(super) async fn handle_notify_auth_changed(
         let settle_started = Instant::now();
         let max_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut model_update_events = 0_u64;
-        while refresh_providers
+        while (refresh_providers
             .iter()
             .any(|provider| provider.auth_model_refresh_pending())
+            || deferred_refreshes_pending.load(Ordering::Acquire) > 0)
             && tokio::time::Instant::now() < max_deadline
         {
             tokio::select! {
@@ -1174,7 +1163,8 @@ pub(super) async fn handle_notify_auth_changed(
         }
         let refresh_timed_out = refresh_providers
             .iter()
-            .any(|provider| provider.auth_model_refresh_pending());
+            .any(|provider| provider.auth_model_refresh_pending())
+            || deferred_refreshes_pending.load(Ordering::Acquire) > 0;
         latest_snapshot = available_models_snapshot(&agent_clone).await;
         send_available_models_snapshot(&client_event_tx_clone, latest_snapshot.clone());
         let settle_ms = settle_started.elapsed().as_millis();

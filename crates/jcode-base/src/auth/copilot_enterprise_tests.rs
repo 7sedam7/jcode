@@ -177,16 +177,20 @@ fn a_non_https_endpoint_is_ignored() {
 fn the_discovered_endpoint_wins_over_the_constructed_one() {
     let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     clear_discovered_api_base();
+    let token = "enterprise-seat-token";
 
     // Before discovery: the dotcom default.
-    assert_eq!(api_base(), "https://api.githubcopilot.com");
+    assert_eq!(api_base_for(token), "https://api.githubcopilot.com");
 
     // After: whatever GitHub said, which is the whole point.
-    record_discovered_api_base("https://api.enterprise.githubcopilot.com/");
-    assert_eq!(api_base(), "https://api.enterprise.githubcopilot.com");
+    record_discovered_api_base_for(token, "https://api.enterprise.githubcopilot.com/");
+    assert_eq!(
+        api_base_for(token),
+        "https://api.enterprise.githubcopilot.com"
+    );
 
     clear_discovered_api_base();
-    assert_eq!(api_base(), "https://api.githubcopilot.com");
+    assert_eq!(api_base_for(token), "https://api.githubcopilot.com");
 }
 
 #[test]
@@ -196,10 +200,39 @@ fn discovery_also_wins_over_an_explicit_enterprise_domain() {
     let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     clear_discovered_api_base();
     crate::env::set_var(COPILOT_ENTERPRISE_URL_ENV, "company.ghe.com");
+    let token = "ghes-token";
 
-    assert_eq!(api_base(), "https://copilot-api.company.ghe.com");
-    record_discovered_api_base("https://copilot.company.ghe.com");
-    assert_eq!(api_base(), "https://copilot.company.ghe.com");
+    assert_eq!(api_base_for(token), "https://copilot-api.company.ghe.com");
+    record_discovered_api_base_for(token, "https://copilot.company.ghe.com");
+    assert_eq!(api_base_for(token), "https://copilot.company.ghe.com");
 
     clear_discovered_api_base();
+}
+
+#[test]
+fn discovered_endpoints_are_scoped_to_the_token() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    clear_discovered_api_base();
+
+    record_discovered_api_base_for("token-a", "https://api-a.example.test");
+    record_discovered_api_base_for("token-b", "https://api-b.example.test");
+    assert_eq!(api_base_for("token-a"), "https://api-a.example.test");
+    assert_eq!(api_base_for("token-b"), "https://api-b.example.test");
+
+    clear_discovered_api_base_for("token-a");
+    assert_eq!(api_base_for("token-a"), "https://api.githubcopilot.com");
+    assert_eq!(api_base_for("token-b"), "https://api-b.example.test");
+    clear_discovered_api_base();
+}
+
+#[test]
+fn invalidation_rejects_a_late_same_token_endpoint_result() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    clear_discovered_api_base();
+    let generation = ENDPOINT_GENERATION.load(Ordering::Acquire);
+
+    clear_discovered_api_base_for("same-token");
+    record_discovered_api_base_if_current("same-token", "https://stale.example.test", generation);
+
+    assert_eq!(discovered_api_base_for("same-token"), None);
 }

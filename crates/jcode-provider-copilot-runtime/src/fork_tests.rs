@@ -15,7 +15,8 @@ fn fork_shares_catalog_but_isolates_session_state() {
     let provider = CopilotApiProvider {
         client: jcode_base::provider::shared_http_client(),
         model: Arc::new(RwLock::new("model-a".to_string())),
-        github_token: "test-token".to_string(),
+        github_token: Arc::new(RwLock::new("test-token".to_string())),
+        credential_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         fetched_models: Arc::new(RwLock::new(infos.iter().map(|m| m.id.clone()).collect())),
         model_specs: Arc::new(RwLock::new(CatalogSpecs::from_models(&infos))),
         catalog_source: Arc::new(RwLock::new(CatalogSource::Live)),
@@ -37,6 +38,8 @@ fn fork_shares_catalog_but_isolates_session_state() {
     assert_eq!(Arc::strong_count(&provider.fetched_models), 2);
     assert_eq!(Arc::strong_count(&provider.model_specs), 2);
     assert_eq!(Arc::strong_count(&provider.catalog_source), 2);
+    assert_eq!(Arc::strong_count(&provider.github_token), 2);
+    assert_eq!(Arc::strong_count(&provider.credential_generation), 2);
     assert_eq!(Arc::strong_count(&provider.model), 1);
     assert_eq!(Arc::strong_count(&provider.premium_mode), 1);
     assert_eq!(Arc::strong_count(&provider.user_turn_count), 1);

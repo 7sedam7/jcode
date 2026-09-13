@@ -1,6 +1,39 @@
 use super::*;
 
 impl MultiProvider {
+    pub(super) fn spawn_all_post_auth_model_refreshes(&self) {
+        if let Some(anthropic) = self.anthropic_provider() {
+            self.spawn_post_auth_model_refresh(anthropic, "Anthropic");
+        }
+        if let Some(claude) = self.claude_provider() {
+            self.spawn_post_auth_model_refresh(claude, "Claude");
+        }
+        if let Some(openai) = self.openai_provider() {
+            self.spawn_post_auth_model_refresh(openai, "OpenAI");
+        }
+        if let Some(copilot) = self.copilot_provider() {
+            self.spawn_post_auth_model_refresh(copilot, "Copilot");
+        }
+        if let Some(antigravity) = self.antigravity_provider() {
+            self.spawn_post_auth_model_refresh(antigravity, "Antigravity");
+        }
+        if let Some(gemini) = self.gemini_provider() {
+            self.spawn_post_auth_model_refresh(gemini, "Gemini");
+        }
+        if let Some(cursor) = self.cursor_provider() {
+            self.spawn_post_auth_model_refresh(cursor, "Cursor");
+        }
+        if let Some(openrouter) = self.openrouter_provider() {
+            self.spawn_post_auth_model_refresh(openrouter, "OpenRouter");
+        }
+        if let Some(bedrock) = self.bedrock_provider() {
+            self.spawn_post_auth_model_refresh(bedrock, "AWS Bedrock");
+        }
+        if let Some(grok) = ProviderRegistry::new(self).compatible_profile(GROK_BUILD_PROFILE_ID) {
+            self.spawn_post_auth_model_refresh(grok, "Grok Build");
+        }
+    }
+
     pub(super) fn spawn_post_auth_model_refresh(
         &self,
         provider: Arc<dyn Provider>,

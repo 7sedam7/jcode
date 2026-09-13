@@ -6,7 +6,7 @@
 //! minted under, so nothing here may be replaced with a static table.
 
 use super::{COPILOT_AUTH_API_VERSION, EDITOR_VERSION};
-use crate::auth::copilot_enterprise::api_base;
+use crate::auth::copilot_enterprise::api_base_for;
 use anyhow::{Context, Result};
 use jcode_provider_core::copilot_catalog_pricing::{CopilotCatalogBilling, CopilotTokenPricesTier};
 use serde::Deserialize;
@@ -299,6 +299,13 @@ pub fn record_catalog_billing(models: &[CopilotModelInfo]) {
     }
 }
 
+/// Forget prices published by a previous Copilot account.
+pub fn clear_catalog_billing() {
+    if let Ok(mut cache) = CATALOG_BILLING.write() {
+        cache.clear();
+    }
+}
+
 /// Prices for `model` from the live catalog, if it has been fetched.
 pub fn catalog_billing_for(model: &str) -> Option<CopilotCatalogBilling> {
     CATALOG_BILLING.read().ok()?.get(model).cloned()
@@ -358,7 +365,7 @@ pub async fn fetch_available_models(
     bearer_token: &str,
 ) -> Result<Vec<CopilotModelInfo>> {
     let resp = client
-        .get(format!("{}/models", api_base()))
+        .get(format!("{}/models", api_base_for(bearer_token)))
         .header("Authorization", format!("Bearer {}", bearer_token))
         .header("Editor-Version", EDITOR_VERSION)
         .header("X-GitHub-Api-Version", COPILOT_AUTH_API_VERSION)

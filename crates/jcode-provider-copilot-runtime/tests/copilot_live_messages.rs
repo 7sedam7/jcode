@@ -74,7 +74,7 @@ async fn provider_streams_a_claude_turn_end_to_end() {
     let provider =
         jcode_provider_copilot_runtime::CopilotApiProvider::new_with_token(token.clone());
     let _ = provider.set_model("claude-sonnet-4.6");
-    provider.detect_tier_and_set_default().await;
+    provider.detect_tier_and_set_default().await.unwrap();
     // Tier detection may switch the default model; pin the one under test.
     let _ = provider.set_model("claude-sonnet-4.6");
 
@@ -118,7 +118,7 @@ async fn provider_emits_tool_calls_on_the_messages_route() {
 
     let token = std::env::var("COPILOT_LIVE_TOKEN").expect("COPILOT_LIVE_TOKEN");
     let provider = jcode_provider_copilot_runtime::CopilotApiProvider::new_with_token(token);
-    provider.detect_tier_and_set_default().await;
+    provider.detect_tier_and_set_default().await.unwrap();
     let _ = provider.set_model("claude-sonnet-4.6");
 
     let tools = vec![ToolDefinition {

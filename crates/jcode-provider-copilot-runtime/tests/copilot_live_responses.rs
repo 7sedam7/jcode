@@ -23,7 +23,7 @@ fn user(text: &str) -> Message {
 async fn provider(model: &str) -> jcode_provider_copilot_runtime::CopilotApiProvider {
     let token = std::env::var("COPILOT_LIVE_TOKEN").expect("COPILOT_LIVE_TOKEN");
     let p = jcode_provider_copilot_runtime::CopilotApiProvider::new_with_token(token);
-    p.detect_tier_and_set_default().await;
+    p.detect_tier_and_set_default().await.unwrap();
     let _ = p.set_model(model);
     p
 }

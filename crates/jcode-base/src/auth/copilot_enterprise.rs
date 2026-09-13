@@ -23,7 +23,10 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, RwLock};
 
 /// Environment override for the enterprise domain. Empty or unset means dotcom.
@@ -259,16 +262,31 @@ impl CopilotUserInfo {
     }
 }
 
-/// API base discovered from `/copilot_internal/user`, cached for the process.
+/// API base discovered from `/copilot_internal/user`, cached for the token that
+/// produced it.
 ///
-/// Discovery needs a network round trip, but the base URL is needed on every
-/// request, so the answer is cached once the first successful probe lands.
-static DISCOVERED_API_BASE: LazyLock<RwLock<Option<String>>> = LazyLock::new(|| RwLock::new(None));
+/// A process can briefly hold old and new Copilot providers while a login is
+/// propagated to the persistent server. Keying the endpoint by a one-way token
+/// fingerprint prevents either provider from borrowing the other account's
+/// routing decision without retaining another plaintext copy of the token.
+static DISCOVERED_API_BASES: LazyLock<RwLock<HashMap<[u8; 32], String>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+static ENDPOINT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn token_fingerprint(token: &str) -> [u8; 32] {
+    Sha256::digest(token.as_bytes()).into()
+}
+
+/// Stable, non-reversible key for account-scoped caches.
+pub fn token_cache_key(token: &str) -> String {
+    hex::encode(token_fingerprint(token))
+}
 
 /// Ask GitHub where to send this token's Copilot traffic, and what it may use.
 ///
 /// Caches the discovered API base as a side effect.
 pub async fn fetch_user_info(client: &reqwest::Client, token: &str) -> Result<CopilotUserInfo> {
+    let generation = ENDPOINT_GENERATION.load(Ordering::Acquire);
     let deployment = current_deployment();
     let url = format!("{}/copilot_internal/user", deployment.rest_api_base());
     let resp = client
@@ -291,46 +309,94 @@ pub async fn fetch_user_info(client: &reqwest::Client, token: &str) -> Result<Co
         .await
         .context("Failed to parse the Copilot seat response")?;
 
-    if let Some(base) = info.api_base() {
-        record_discovered_api_base(base);
-    }
+    let base = info
+        .api_base()
+        .map(str::to_string)
+        .unwrap_or_else(|| deployment.api_base());
+    record_discovered_api_base_if_current(token, &base, generation);
     Ok(info)
 }
 
-/// Publish an API base discovered from GitHub.
-pub fn record_discovered_api_base(base: &str) {
+/// Resolve and cache the inference endpoint assigned to this token's seat.
+///
+/// `/models` succeeds on the public host even when a github.com account has an
+/// Enterprise seat whose inference calls must use
+/// `api.enterprise.githubcopilot.com`. Every request path therefore calls this
+/// before it captures a base URL instead of treating catalog success as proof
+/// that the default endpoint is valid.
+pub async fn ensure_api_base(client: &reqwest::Client, token: &str) -> Result<String> {
+    for _ in 0..3 {
+        if let Some(base) = discovered_api_base_for(token) {
+            return Ok(base);
+        }
+        fetch_user_info(client, token).await?;
+    }
+    anyhow::bail!("Copilot credentials changed repeatedly during endpoint discovery")
+}
+
+/// Publish an API base discovered from GitHub for one credential.
+pub fn record_discovered_api_base_for(token: &str, base: &str) {
     let base = base.trim().trim_end_matches('/');
     if base.is_empty() {
         return;
     }
-    if let Ok(mut cached) = DISCOVERED_API_BASE.write() {
-        if cached.as_deref() != Some(base) {
+    let token_fingerprint = token_fingerprint(token);
+    if let Ok(mut cached) = DISCOVERED_API_BASES.write() {
+        if cached
+            .get(&token_fingerprint)
+            .is_none_or(|cached| cached != base)
+        {
             crate::logging::info(&format!("Copilot API endpoint discovered: {base}"));
         }
-        *cached = Some(base.to_string());
+        cached.insert(token_fingerprint, base.to_string());
     }
 }
 
-/// Forget the discovered endpoint. Used when credentials change, and by tests.
-pub fn clear_discovered_api_base() {
-    if let Ok(mut cached) = DISCOVERED_API_BASE.write() {
-        *cached = None;
+fn record_discovered_api_base_if_current(token: &str, base: &str, generation: u64) {
+    let base = base.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return;
     }
-}
-
-/// Base URL for Copilot API requests.
-///
-/// Precedence:
-/// 1. The endpoint GitHub assigned this seat, once discovered. Enterprise seats
-///    are served from `api.enterprise.githubcopilot.com`, so anything built from
-///    the deployment name is a guess that can be wrong.
-/// 2. The configured deployment's default, which is all that is available
-///    before the first probe answers, and on GHES hosts that report no endpoint.
-pub fn api_base() -> String {
-    if let Ok(cached) = DISCOVERED_API_BASE.read()
-        && let Some(base) = cached.as_deref()
+    let fingerprint = token_fingerprint(token);
+    if let Ok(mut cached) = DISCOVERED_API_BASES.write()
+        && ENDPOINT_GENERATION.load(Ordering::Acquire) == generation
     {
-        return base.to_string();
+        cached.insert(fingerprint, base.to_string());
     }
-    current_deployment().api_base()
+}
+
+/// Return the cached API base only when it belongs to `token`.
+pub fn discovered_api_base_for(token: &str) -> Option<String> {
+    let fingerprint = token_fingerprint(token);
+    DISCOVERED_API_BASES
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&fingerprint)
+        .cloned()
+}
+
+/// Forget the endpoint for `token`, leaving another credential's entry intact.
+pub fn clear_discovered_api_base_for(token: &str) {
+    ENDPOINT_GENERATION.fetch_add(1, Ordering::AcqRel);
+    let fingerprint = token_fingerprint(token);
+    if let Ok(mut cached) = DISCOVERED_API_BASES.write() {
+        cached.remove(&fingerprint);
+    }
+}
+
+/// Forget every discovered endpoint. Used by isolated tests.
+pub fn clear_discovered_api_base() {
+    ENDPOINT_GENERATION.fetch_add(1, Ordering::AcqRel);
+    if let Ok(mut cached) = DISCOVERED_API_BASES.write() {
+        cached.clear();
+    }
+}
+
+/// Base URL for a specific Copilot credential.
+///
+/// The endpoint GitHub assigned this token wins over the configured
+/// deployment's default. Call [`ensure_api_base`] before inference so the
+/// fallback is used only when seat discovery genuinely failed.
+pub fn api_base_for(token: &str) -> String {
+    discovered_api_base_for(token).unwrap_or_else(|| current_deployment().api_base())
 }

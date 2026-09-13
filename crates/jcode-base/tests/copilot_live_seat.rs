@@ -3,7 +3,9 @@
 //!
 //! Ignored by default; needs a GitHub OAuth token in `COPILOT_LIVE_TOKEN`.
 
-use jcode_base::auth::copilot_enterprise::{api_base, fetch_user_info, record_discovered_api_base};
+use jcode_base::auth::copilot_enterprise::{
+    api_base_for, fetch_user_info, record_discovered_api_base_for,
+};
 
 #[tokio::test]
 #[ignore = "hits the live GitHub API"]
@@ -25,11 +27,11 @@ async fn the_seat_lookup_reports_a_plan_and_an_endpoint() {
     // hardcoding the wrong base for an enterprise seat.
     if let Some(discovered) = info.api_base() {
         assert!(discovered.starts_with("https://"), "{discovered}");
-        record_discovered_api_base(discovered);
-        assert_eq!(api_base(), discovered.trim_end_matches('/'));
+        record_discovered_api_base_for(&token, discovered);
+        assert_eq!(api_base_for(&token), discovered.trim_end_matches('/'));
 
         let status = client
-            .get(format!("{}/models", api_base()))
+            .get(format!("{}/models", api_base_for(&token)))
             .bearer_auth(&token)
             .header("X-GitHub-Api-Version", "2026-06-01")
             .send()

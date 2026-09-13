@@ -31,7 +31,7 @@ pub fn guidance_for(status: u16, body: &str) -> Option<String> {
     // An enterprise deployment 401s every request when the token came from
     // github.com (or the reverse). The body says only "unauthorized", so name
     // the deployment: it is the setting that is almost always at fault.
-    if status == 401 || status == 403 {
+    if status == 401 {
         let deployment = jcode_base::auth::copilot_enterprise::current_deployment();
         return Some(match deployment.enterprise_domain() {
             Some(domain) => format!(
@@ -167,8 +167,14 @@ pub(crate) mod tests {
     #[test]
     fn unauthorized_on_dotcom_points_at_enterprise_as_the_likely_cause() {
         let _env = DeploymentEnv::set("");
-        let guidance = guidance_for(403, "forbidden").expect("403 is actionable");
+        let guidance = guidance_for(401, "unauthorized").expect("401 is actionable");
         assert!(guidance.contains("--enterprise"), "{guidance}");
+    }
+
+    #[test]
+    fn forbidden_is_not_assumed_to_be_an_auth_or_deployment_failure() {
+        let _env = DeploymentEnv::set("");
+        assert_eq!(guidance_for(403, "terms of service"), None);
     }
 
     #[test]

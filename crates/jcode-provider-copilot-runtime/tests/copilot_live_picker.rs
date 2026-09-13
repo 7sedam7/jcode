@@ -17,7 +17,7 @@ async fn picker_shows_the_live_catalog_not_a_hardcoded_list() {
     let before = p.available_models_display();
     eprintln!("BEFORE detect ({}): {:?}", before.len(), before);
 
-    p.detect_tier_and_set_default().await;
+    p.detect_tier_and_set_default().await.unwrap();
     let after = p.available_models_display();
     eprintln!("AFTER detect ({}): {:?}", after.len(), after);
     eprintln!("default model -> {}", p.model());
@@ -51,7 +51,7 @@ async fn picker_shows_the_live_catalog_not_a_hardcoded_list() {
 async fn reasoning_efforts_come_from_the_catalog() {
     let token = std::env::var("COPILOT_LIVE_TOKEN").expect("COPILOT_LIVE_TOKEN");
     let p = jcode_provider_copilot_runtime::CopilotApiProvider::new_with_token(token);
-    p.detect_tier_and_set_default().await;
+    p.detect_tier_and_set_default().await.unwrap();
 
     // Every reasoning model advertises its own vocabulary; asserting a fixed
     // list would just re-encode the bug this replaced.
@@ -85,7 +85,7 @@ async fn reasoning_efforts_come_from_the_catalog() {
 async fn embedding_models_are_not_offered_as_chat_models() {
     let token = std::env::var("COPILOT_LIVE_TOKEN").expect("COPILOT_LIVE_TOKEN");
     let p = jcode_provider_copilot_runtime::CopilotApiProvider::new_with_token(token);
-    p.detect_tier_and_set_default().await;
+    p.detect_tier_and_set_default().await.unwrap();
 
     for model in p.available_models_display() {
         assert!(
@@ -102,7 +102,7 @@ async fn context_windows_come_from_the_account_catalog() {
     // because the catalog's limits were never consulted.
     let token = std::env::var("COPILOT_LIVE_TOKEN").expect("COPILOT_LIVE_TOKEN");
     let p = jcode_provider_copilot_runtime::CopilotApiProvider::new_with_token(token.clone());
-    p.detect_tier_and_set_default().await;
+    p.detect_tier_and_set_default().await.unwrap();
 
     let mut windows = Vec::new();
     for model in p.available_models_for_switching() {
@@ -135,7 +135,7 @@ async fn the_shared_context_lookup_reports_real_windows_after_startup() {
     // static table that answers 128k for almost everything.
     let token = std::env::var("COPILOT_LIVE_TOKEN").expect("COPILOT_LIVE_TOKEN");
     let p = jcode_provider_copilot_runtime::CopilotApiProvider::new_with_token(token);
-    p.detect_tier_and_set_default().await;
+    p.detect_tier_and_set_default().await.unwrap();
 
     let mut seen = Vec::new();
     for model in p.available_models_for_switching() {

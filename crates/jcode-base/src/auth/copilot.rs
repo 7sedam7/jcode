@@ -691,7 +691,10 @@ pub async fn verify_copilot_token(client: &reqwest::Client, github_token: &str) 
     loop {
         attempt += 1;
         let resp = client
-            .get(format!("{}/models", super::copilot_enterprise::api_base()))
+            .get(format!(
+                "{}/models",
+                super::copilot_enterprise::api_base_for(github_token)
+            ))
             .header("Authorization", format!("Bearer {github_token}"))
             .header("User-Agent", EDITOR_VERSION)
             .header("X-GitHub-Api-Version", COPILOT_AUTH_API_VERSION)

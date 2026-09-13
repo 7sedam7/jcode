@@ -1,10 +1,11 @@
 use super::*;
 
-fn make_test_provider(fetched: Vec<String>) -> CopilotApiProvider {
+pub(super) fn make_test_provider(fetched: Vec<String>) -> CopilotApiProvider {
     CopilotApiProvider {
         client: jcode_base::provider::shared_http_client(),
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
-        github_token: "test-token".to_string(),
+        github_token: Arc::new(RwLock::new("test-token".to_string())),
+        credential_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         model_specs: Arc::new(RwLock::new(CatalogSpecs::default())),
         fetched_models: Arc::new(RwLock::new(fetched)),
         catalog_source: Arc::new(RwLock::new(CatalogSource::Live)),
@@ -120,7 +121,10 @@ async fn prefetch_is_never_skipped_while_the_catalog_is_empty() {
     provider
         .init_done
         .store(false, std::sync::atomic::Ordering::Release);
-    Provider::prefetch_models(&provider).await.unwrap();
+    assert!(
+        Provider::prefetch_models(&provider).await.is_err(),
+        "the fake credential should prove that the first catalog fetch ran"
+    );
     assert!(
         provider
             .init_done
@@ -853,11 +857,11 @@ fn fork_preserves_reasoning_effort() {
 fn model_requests_use_the_enterprise_base_url() {
     let enterprise = {
         let _env = crate::errors::tests::DeploymentEnv::set("https://company.ghe.com/");
-        request_base_url()
+        copilot_auth_enterprise::api_base_for("deployment-routing-token")
     };
     let dotcom = {
         let _env = crate::errors::tests::DeploymentEnv::set("");
-        request_base_url()
+        copilot_auth_enterprise::api_base_for("deployment-routing-token")
     };
 
     assert_eq!(enterprise, "https://copilot-api.company.ghe.com");
@@ -934,6 +938,7 @@ fn the_cached_catalog_round_trips_the_context_windows() {
     let cached = crate::startup::PersistedCopilotCatalog {
         models: vec!["claude-sonnet-4.6".to_string()],
         specs: CatalogSpecs::from_models(&[info]),
+        credential_key: copilot_auth_enterprise::token_cache_key("test-token"),
         fetched_at_rfc3339: "2026-01-01T00:00:00Z".to_string(),
     };
 
@@ -957,6 +962,7 @@ fn an_ids_only_cache_from_an_older_build_still_loads() {
     let restored: crate::startup::PersistedCopilotCatalog = serde_json::from_str(legacy).unwrap();
     assert_eq!(restored.models, vec!["gpt-4o".to_string()]);
     assert!(restored.specs.is_empty());
+    assert!(restored.credential_key.is_empty());
 }
 
 /// Serializes the tests that mutate the process-wide catalog registry.

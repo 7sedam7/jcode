@@ -279,7 +279,11 @@ pub fn register_external_provider_runtimes() {
             if eager_tier_detection && tokio::runtime::Handle::try_current().is_ok() {
                 let p_clone = std::sync::Arc::clone(&provider);
                 tokio::spawn(async move {
-                    p_clone.detect_tier_and_set_default().await;
+                    if let Err(error) = p_clone.detect_tier_and_set_default().await {
+                        crate::logging::warn(&format!(
+                            "Copilot startup catalog refresh failed: {error}"
+                        ));
+                    }
                 });
             } else {
                 provider.complete_init_without_tier_detection();
