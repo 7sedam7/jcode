@@ -634,26 +634,10 @@ fn apply_set_route(
         ],
     );
 
-    if let Some(current) = model_switching_unavailable_current(agent) {
-        crate::logging::event_warn(
-            "server_set_route_unavailable",
-            vec![
-                ("id", id.to_string()),
-                ("requested_model", selection.model.clone()),
-                ("requested_provider", selection.provider_label.clone()),
-                ("current_model", current.clone()),
-            ],
-        );
-        let _ = client_event_tx.send(ServerEvent::ModelChanged {
-            id,
-            model: current,
-            provider_name: None,
-            context_window: None,
-            error: Some("Model switching is not available for this provider.".to_string()),
-        });
-        return;
-    }
-
+    // A structured route can intentionally leave the active runtime. Do not
+    // reject it just because that runtime has no local cycle-model catalog. In
+    // particular, a session created before first login starts on the deferred
+    // Claude placeholder, then selects a newly authenticated Copilot route.
     let current = agent.provider_model();
     let result = {
         let result = agent.set_route_selection(&selection);
@@ -1275,6 +1259,9 @@ pub(super) async fn handle_notify_auth_changed(
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
+#[cfg(test)]
+#[path = "provider_control_route_tests.rs"]
+mod provider_control_route_tests;
 #[cfg(test)]
 #[path = "provider_control_tests.rs"]
 mod provider_control_tests;
